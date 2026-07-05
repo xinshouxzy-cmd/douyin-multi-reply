@@ -178,9 +178,8 @@ class AccountWorker(QThread):
         """)
 
     def _send_reply(self, driver, text):
-        """定位输入框 → 键盘逐字输入 → Enter 发送"""
-        # 精准找输入框：在页面下半部分、高度适中的 contenteditable div
-        driver.execute_script("""
+        """定位输入框 → 键盘逐字输入 → Enter 发送 → 返回是否成功"""
+        found = driver.execute_script("""
             let inp = null;
             let all = document.querySelectorAll('div[contenteditable="true"], textarea');
             for (let el of all) {
@@ -192,9 +191,11 @@ class AccountWorker(QThread):
             if (!inp) {
                 inp = document.querySelector('div[data-placeholder]') || document.querySelector('div[class*="rich-input"]');
             }
-            if (inp) { inp.focus(); inp.click(); window._lastInput = inp; }
+            if (inp) { inp.focus(); inp.click(); }
             return !!inp;
         """)
+        if not found:
+            return False
         time.sleep(0.3)
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.common.action_chains import ActionChains
@@ -204,6 +205,7 @@ class AccountWorker(QThread):
         actions.pause(0.3)
         actions.send_keys(Keys.ENTER)
         actions.perform()
+        return True
 
     def _write_log(self, sender, msg_in, msg_out):
         """写入CSV日志"""
@@ -289,20 +291,24 @@ class AccountWorker(QThread):
             self.status_signal.emit(self.name, "监控中")
             self.log("✅ 开始监控私信")
 
-            replied_ids = set()
+            # 用 (conversation_id, unread_count) 追踪：只有count变大才说明新消息
+            seen_counts = {}  # cid -> last_unread_count
 
             while not self._stop:
                 try:
-                    # 扫描红点（跳过群聊，使用会话ID去重）
                     reds = self._scan_reds(driver)
                     
                     for red in reds:
                         if self._stop: break
                         cid = red.get("id")
-                        if cid in replied_ids: continue
-                        replied_ids.add(cid)
+                        count = int(red.get("unread", "1").replace("+","")) if red.get("unread","1").replace("+","").isdigit() else 1
+                        
+                        # 只有未读数增加了才算新消息（排除已处理的旧红点）
+                        if cid in seen_counts and count <= seen_counts[cid]:
+                            continue
+                        seen_counts[cid] = count
 
-                        # 点进去——用和扫描时相同的选择器
+                        # 点进去
                         clicked = driver.execute_script(f"""
                             try {{
                                 let items = document.querySelectorAll(
@@ -316,24 +322,45 @@ class AccountWorker(QThread):
                             }} catch(e) {{ return false; }}
                         """)
                         if not clicked: continue
-                        time.sleep(2)
+                        time.sleep(3)
 
-                        # 读消息
+                        # 读最后一条消息——尝试多种选择器
                         last_msg = driver.execute_script("""
-                            let msgs = document.querySelectorAll('[class*="message"], [class*="msg"], div[class*="bubble"]');
-                            return msgs.length > 0 ? msgs[msgs.length-1].textContent.trim() : '';
+                            let all = [];
+                            // 尝试多种消息选择器
+                            let sels = [
+                                'div[class*="message-content"]', 'div[class*="bubble"]',
+                                'div[class*="chat-msg"]', 'div[class*="text-item"]',
+                                'div[class*="msg-text"]', 'span[class*="content"]',
+                                'div[class*="im-message"]'
+                            ];
+                            for (let s of sels) {
+                                let found = document.querySelectorAll(s);
+                                if (found.length > 0) { all = found; break; }
+                            }
+                            if (all.length === 0) {
+                                all = document.querySelectorAll('div[class]');
+                            }
+                            // 取最后一个看起来像消息的元素
+                            for (let i = all.length - 1; i >= 0; i--) {
+                                let t = all[i].textContent.trim();
+                                if (t.length > 1 && t.length < 500 && !t.includes('发送') && !t.includes('输入')) {
+                                    return t;
+                                }
+                            }
+                            return '';
                         """)
 
                         reply_text, rule_name = self.match_reply(last_msg)
                         if reply_text:
-                            self._send_reply(driver, reply_text)
-                            sender = red.get("name", "用户")
-                            self.log(f"📩 {sender}: {last_msg[:30]} → 📤 {reply_text[:30]} [{rule_name}]")
-                            self.reply_signal.emit(self.name, last_msg[:40], reply_text[:40])
-                            self._write_log(sender, last_msg, reply_text)
+                            ok = self._send_reply(driver, reply_text)
+                            if ok:
+                                sender = red.get("name", "用户")
+                                self.log(f"📩 {sender}: {last_msg[:30]} → 📤 {reply_text[:30]} [{rule_name}]")
+                                self.reply_signal.emit(self.name, last_msg[:40], reply_text[:40])
+                                self._write_log(sender, last_msg, reply_text)
                             time.sleep(1)
 
-                        # 退回列表
                         self._back_to_list(driver)
                         time.sleep(1)
 
