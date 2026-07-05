@@ -174,6 +174,33 @@ class AccountWorker(QThread):
             return cleaned
         return [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
 
+    def _click_red_item(self, driver, name):
+        """点击红点对话——找带数字的 sup/span，点击其父元素"""
+        clicked = driver.execute_script("""
+            // 找到所有 sup 标签（通常是红点数字）
+            let badges = document.querySelectorAll('sup, span[class*="count"], span[class*="num"]');
+            for (let b of badges) {
+                let t = b.textContent.trim();
+                if (t && /\\d/.test(t)) {
+                    // 向上找到可点击的父级（对话列表项）
+                    let item = b;
+                    for (let depth = 0; depth < 5 && item; depth++) {
+                        if (item.tagName === 'DIV' && item.className) {
+                            let text = item.textContent || '';
+                            if (text.length > 2 && text.length < 200 && !text.includes('群聊')) {
+                                item.click();
+                                return JSON.stringify({ok: true, name: text.substring(0,20)});
+                            }
+                        }
+                        item = item.parentElement;
+                    }
+                }
+            }
+            return JSON.stringify({ok: false});
+        """)
+        result = json.loads(clicked) if clicked else {"ok": False}
+        return result.get("ok", False)
+
     def _back_to_list(self, driver):
         """退回消息列表——多种方式尝试"""
         driver.execute_script("""
@@ -320,89 +347,49 @@ class AccountWorker(QThread):
                         cid = red.get("id")
                         count = int(red.get("unread", "1").replace("+","")) if red.get("unread","1").replace("+","").isdigit() else 1
                         
-                        # 只有未读数增加了才算新消息（排除已处理的旧红点）
                         if cid in seen_counts and count <= seen_counts[cid]:
                             continue
-                        seen_counts[cid] = count
 
-                        # 点击红点对话——多种方式兜底
-                        clicked = False
-                        # 方式1：按名字匹配
-                        name = red.get("name", "")
-                        if name:
-                            clicked = driver.execute_script(f"""
-                                let name = {json.dumps(name)};
-                                let items = document.querySelectorAll('div[class]');
-                                for (let el of items) {{
-                                    if (el.textContent.includes(name) && !el.textContent.includes('群聊')) {{
-                                        let badge = el.querySelector('sup, [class*="badge"], [class*="unread"]');
-                                        if (badge) {{ el.click(); return true; }}
-                                    }}
-                                }}
-                                return false;
-                            """)
-                        # 方式2：按索引点击（和扫描用同一套选择器）
-                        if not clicked:
-                            clicked = driver.execute_script(f"""
-                                let items = document.querySelectorAll(
-                                    '[class*="conversation"], [class*="session"], [class*="chat-item"], ' +
-                                    '[class*="contact-item"], [class*="list-item"], [class*="message-item"], ' +
-                                    'div[class*="Cov"], [class*="user-item"], li[class*="item"]'
-                                );
-                                if (items.length < 2) items = document.querySelectorAll('div[class]');
-                                for (let i = 0; i < items.length; i++) {{
-                                    let b = items[i].querySelector('sup, [class*="badge"], [class*="unread"]');
-                                    if (b) {{ items[i].click(); return true; }}
-                                }}
-                                return false;
-                            """)
-                        # 方式3：直接用Selenium查找带红点的元素并点击
-                        if not clicked:
-                            try:
-                                from selenium.webdriver.common.by import By
-                                all_divs = driver.find_elements(By.CSS_SELECTOR, "div[class]")
-                                for el in all_divs:
-                                    try:
-                                        text = el.text or ""
-                                        if name and name in text and "群聊" not in text:
-                                            badges = el.find_elements(By.CSS_SELECTOR, "sup, [class*='badge'], [class*='unread']")
-                                            if badges:
-                                                el.click()
-                                                clicked = True
-                                                break
-                                    except:
-                                        continue
-                            except:
-                                pass
+                        name = red.get("name", "用户")
 
+                        # === 步骤1：点击红点对话 ===
+                        self.log(f"点击红点: {name}({count}条)")
+                        clicked = self._click_red_item(driver, name)
                         if not clicked:
                             continue
-                        self.log(f"点击 {name} 成功，等待加载")
-                        time.sleep(3)
+                        time.sleep(2)
 
-                        # 读最后一条消息——尝试多种选择器
+                        # === 步骤2：确认红点消失 ===
+                        badge_gone = driver.execute_script("""
+                            let badges = document.querySelectorAll('sup, [class*="badge"], [class*="unread"]');
+                            for (let b of badges) {
+                                let t = b.textContent.trim();
+                                if (t && /\\d/.test(t)) return false;
+                            }
+                            // 也检查一下是否进入了聊天画面
+                            let input = document.querySelector('div[contenteditable="true"], textarea');
+                            return !!input;
+                        """)
+                        if not badge_gone:
+                            self.log(f"红点未消失或未进入对话，跳过")
+                            self._back_to_list(driver)
+                            continue
+                        time.sleep(1)
+
+                        # === 步骤3：读消息 + 回复 ===
                         last_msg = driver.execute_script("""
                             let all = [];
-                            // 尝试多种消息选择器
-                            let sels = [
-                                'div[class*="message-content"]', 'div[class*="bubble"]',
+                            let sels = ['div[class*="message-content"]', 'div[class*="bubble"]',
                                 'div[class*="chat-msg"]', 'div[class*="text-item"]',
-                                'div[class*="msg-text"]', 'span[class*="content"]',
-                                'div[class*="im-message"]'
-                            ];
+                                'span[class*="content"]', 'div[class*="im-message"]'];
                             for (let s of sels) {
                                 let found = document.querySelectorAll(s);
                                 if (found.length > 0) { all = found; break; }
                             }
-                            if (all.length === 0) {
-                                all = document.querySelectorAll('div[class]');
-                            }
-                            // 取最后一个看起来像消息的元素
                             for (let i = all.length - 1; i >= 0; i--) {
                                 let t = all[i].textContent.trim();
-                                if (t.length > 1 && t.length < 500 && !t.includes('发送') && !t.includes('输入')) {
+                                if (t.length > 0 && t.length < 500 && !t.includes('发送') && !t.includes('输入'))
                                     return t;
-                                }
                             }
                             return '';
                         """)
@@ -411,14 +398,12 @@ class AccountWorker(QThread):
                         if reply_text:
                             ok = self._send_reply(driver, reply_text)
                             if ok:
-                                sender = red.get("name", "用户")
-                                self.log(f"📩 {sender}: {last_msg[:30]} → 📤 {reply_text[:30]} [{rule_name}]")
-                                self.reply_signal.emit(self.name, last_msg[:40], reply_text[:40])
-                                self._write_log(sender, last_msg, reply_text)
-                            # 回复成功 → 清除计数追踪，允许后续新消息
-                            del seen_counts[cid]
-                            time.sleep(1)
+                                self.log(f"📤 回复{name}: {reply_text[:30]} [{rule_name}]")
+                                self._write_log(name, last_msg, reply_text)
+                                seen_counts[cid] = count
+                                time.sleep(1)
 
+                        # === 步骤4：退回列表 ===
                         self._back_to_list(driver)
                         time.sleep(2)
 
