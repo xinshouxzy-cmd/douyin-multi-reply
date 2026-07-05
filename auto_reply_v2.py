@@ -141,15 +141,10 @@ class AccountWorker(QThread):
         return json.loads(raw) if raw else []
 
     def _back_to_list(self, driver):
-        """退回消息列表"""
+        """退回消息列表（只在对话框内时操作）"""
         driver.execute_script("""
-            try {
-                let back = document.querySelector('[class*="back"], [class*="return"], [class*="arrow-left"]');
-                if (back) { back.closest('div,button,span').click(); return; }
-                let tabs = document.querySelectorAll('[class*="tab"]');
-                for (let t of tabs) if (/消息/.test(t.textContent)) { t.click(); return; }
-                history.back();
-            } catch(e) {}
+            let back = document.querySelector('[class*="back"], [class*="return"], [class*="arrow-left"]');
+            if (back) { back.closest('div,button,span').click(); }
         """)
 
     def _send_reply(self, driver, text):
@@ -268,10 +263,6 @@ class AccountWorker(QThread):
 
             while not self._stop:
                 try:
-                    # 确保在消息列表页
-                    self._back_to_list(driver)
-                    time.sleep(1)
-
                     # 扫描红点（跳过群聊，使用会话ID去重）
                     reds = self._scan_reds(driver)
                     
