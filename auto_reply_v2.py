@@ -365,7 +365,6 @@ class MainWindow(QMainWindow):
         g = QGroupBox("运行日志")
         vl = QVBoxLayout(g)
         btns = QHBoxLayout()
-        QPushButton("导出日志CSV").clicked.connect(self._export_log); btns.addWidget(btns.findChild(QPushButton) or QPushButton())
         b = QPushButton("导出日志CSV"); b.clicked.connect(self._export_log); btns.addWidget(b)
         b = QPushButton("清空日志"); b.clicked.connect(lambda: self.log_t.clear()); btns.addWidget(b)
         btns.addStretch(); vl.addLayout(btns)
