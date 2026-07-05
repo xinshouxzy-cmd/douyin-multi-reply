@@ -156,7 +156,11 @@ class AccountWorker(QThread):
                 }
             } catch(e) {}
             reds._debug = debug;
-            return JSON.stringify(reds);
+            // 把debug信息也放进JSON（JSON.stringify不序列化自定义属性）
+            reds._debug = debug;
+            let out = JSON.parse(JSON.stringify(reds));
+            out._debug = debug;
+            return JSON.stringify(out);
         """)
         result = json.loads(raw) if raw else []
         # 每20次循环输出一次调试信息（避免刷屏）
@@ -171,10 +175,23 @@ class AccountWorker(QThread):
         return [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
 
     def _back_to_list(self, driver):
-        """退回消息列表（只在对话框内时操作）"""
+        """退回消息列表——多种方式尝试"""
         driver.execute_script("""
-            let back = document.querySelector('[class*="back"], [class*="return"], [class*="arrow-left"]');
-            if (back) { back.closest('div,button,span').click(); }
+            // 方法1：找返回箭头
+            let back = document.querySelector('[class*="back"], [class*="return"], [class*="arrow"], svg');
+            if (back) { back.closest('div,button,span').click(); return; }
+            // 方法2：点消息tab
+            let tabs = document.querySelectorAll('[class*="tab"], [class*="nav"] span, [class*="nav"] div');
+            for (let t of tabs) {
+                if (/消息/.test(t.textContent)) { t.click(); return; }
+            }
+            // 方法3：模拟ESC或点击遮罩
+            let overlay = document.querySelector('[class*="overlay"], [class*="mask"]');
+            if (overlay) { overlay.click(); return; }
+            // 方法4：通过URL导航（最后手段）
+            if (!window.location.href.includes('/messages')) {
+                window.location.href = 'https://www.douyin.com/messages';
+            }
         """)
 
     def _send_reply(self, driver, text):
@@ -359,10 +376,22 @@ class AccountWorker(QThread):
                                 self.log(f"📩 {sender}: {last_msg[:30]} → 📤 {reply_text[:30]} [{rule_name}]")
                                 self.reply_signal.emit(self.name, last_msg[:40], reply_text[:40])
                                 self._write_log(sender, last_msg, reply_text)
+                            # 回复成功 → 清除计数追踪，允许后续新消息
+                            del seen_counts[cid]
                             time.sleep(1)
 
                         self._back_to_list(driver)
-                        time.sleep(1)
+                        time.sleep(2)
+
+                    # 如果连续多轮没找到红点，重置所有计数（可能页面刷新了）
+                    if not reds:
+                        if not hasattr(self, '_empty_rounds'): self._empty_rounds = 0
+                        self._empty_rounds += 1
+                        if self._empty_rounds > 10:
+                            seen_counts.clear()
+                            self._empty_rounds = 0
+                    else:
+                        self._empty_rounds = 0
 
                     time.sleep(self.poll)
 

@@ -148,12 +148,40 @@ class TestMessageFilter(unittest.TestCase):
         self.assertEqual(filter_message_text("好"), "好")
 
 
+class TestReplyTracking(unittest.TestCase):
+    """测试回复后重新检测：回完应允许后续新消息"""
+
+    def test_clear_after_reply_allows_new_message(self):
+        """回复后清除计数，新消息应被识别"""
+        seen = {"cid1": 3}
+        # 模拟：检测到 3 条未读，回复完成，红点消失
+        # 下次循环红点再出现 1 → 应该是新消息
+        cid = "cid1"
+        count = 1
+        # 回完后清掉
+        del seen[cid]
+        # 现在 count=1 应该被识别为新消息
+        self.assertTrue(should_reply(cid, count, seen))
+
+    def test_new_conversation_still_works(self):
+        """新对话不受旧计数影响"""
+        seen = {"cid1": 3}
+        self.assertTrue(should_reply("cid2", 1, seen))
+
+    def test_same_count_after_clear_not_double_reply(self):
+        """回完清掉后，同一轮不要再回两次"""
+        seen = {"cid1": 3}
+        seen["cid1"] = 3  # set to 3
+        # 判断已存在且数量相同 → 不回复
+        self.assertFalse(should_reply("cid1", 3, seen))
+
+
 if __name__ == '__main__':
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(unittest.TestSuite([
         unittest.TestLoader().loadTestsFromTestCase(tc)
         for tc in [TestRuleMatching, TestGroupDetection, TestRedDotParsing,
-                    TestShouldReply, TestMessageFilter]
+                    TestShouldReply, TestMessageFilter, TestReplyTracking]
     ]))
     print(f"\n{'='*50}")
     if result.wasSuccessful():
