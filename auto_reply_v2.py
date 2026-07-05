@@ -114,91 +114,112 @@ class AccountWorker(QThread):
         self._stop = True
 
     def _scan_reds(self, driver):
-        """扫描红点——多种选择器兜底，跳过群聊"""
+        """扫描红点——多重过滤确保只返回真实私聊"""
         raw = driver.execute_script("""
             let reds = [];
             let debug = {total: 0, withBadge: 0};
             try {
-                // 查找私信列表项：尝试多种可能的class名
-                let items = document.querySelectorAll(
-                    '[class*="conversation"], [class*="session"], [class*="chat-item"], ' +
-                    '[class*="contact-item"], [class*="list-item"], [class*="message-item"], ' +
-                    'div[class*="Cov"], [class*="user-item"], li[class*="item"]'
-                );
-                // 如果什么都没找到，说明抖音用了完全不同的结构，尝试所有div
-                if (items.length < 2) {
-                    items = document.querySelectorAll('div[class]');
-                }
-                debug.total = items.length;
+                // 专门找对话列表项：通常是一个可滚动的列表区域内的条目
+                // 尝试多个可能的列表容器
+                let containers = [
+                    document.querySelector('[class*="scroll"]'),
+                    document.querySelector('[class*="list"]'),
+                    document.body
+                ].filter(Boolean);
 
-                for (let i = 0; i < items.length; i++) {
-                    let el = items[i];
-                    let text = (el.textContent || '').trim();
-                    if (!text || text.length > 300) continue;
-                    if (text.includes('群聊')) continue;
+                let allItems = [];
+                for (let c of containers) {
+                    let items = c.querySelectorAll('div[class]');
+                    for (let el of items) {
+                        let text = (el.textContent || '').trim();
+                        // 严格过滤：必须是2-80字符、不含系统文字
+                        if (text.length < 2 || text.length > 80) continue;
+                        if (/设置|隐私|帮助|反馈|举报|屏蔽|客服/.test(text)) continue;
+                        if (text.includes('群聊')) continue;
+                        // 必须有badge
+                        let badge = el.querySelector('sup, [class*="badge"], [class*="unread"], ' +
+                            '[class*="count"], [class*="num"], [class*="red"]');
+                        if (!badge) continue;
+                        let bt = badge.textContent.trim();
+                        if (!bt || !(/\\d/.test(bt) || bt === '新')) continue;
 
-                    // 找红点：sup标签、带数字的span/div、红色背景的小元素
-                    let badge = el.querySelector(
-                        'sup, [class*="badge"], [class*="unread"], [class*="count"], ' +
-                        '[class*="num"], [class*="red"], [class*="dot"]'
-                    );
-                    if (badge) {
-                        let t = badge.textContent.trim();
-                        if (t && (/\\d/.test(t) || t === 'new' || t === '新')) {
-                            debug.withBadge++;
-                            let cid = el.getAttribute('data-id') || el.getAttribute('data-key') || ('cid_'+i);
-                            let name = '';
-                            let sp = el.querySelector('span, [class*="name"], [class*="nick"]');
-                            if (sp) name = sp.textContent.trim().substring(0,15);
-                            reds.push({id: cid, index: i, name: name || text.substring(0,12), unread: t});
+                        debug.withBadge++;
+                        // 提取名字：取第一个最短的、看起来像用户名的文本片段
+                        let name = '';
+                        let children = el.querySelectorAll('span, p, div');
+                        for (let ch of children) {
+                            let ct = ch.textContent.trim();
+                            if (ct.length >= 1 && ct.length <= 15 && !/[设隐帮反举屏]/.test(ct)) {
+                                name = ct; break;
+                            }
                         }
+                        if (!name) name = text.split(/[\\s\\n\\t]/)[0].substring(0, 12);
+
+                        reds.push({
+                            id: el.getAttribute('data-id') || ('cid_'+allItems.length),
+                            index: allItems.length,
+                            name: name,
+                            unread: bt
+                        });
+                        allItems.push(el);
                     }
                 }
+                debug.total = allItems.length;
             } catch(e) {}
-            reds._debug = debug;
-            // 把debug信息也放进JSON（JSON.stringify不序列化自定义属性）
-            reds._debug = debug;
-            let out = JSON.parse(JSON.stringify(reds));
+            // 把debug放进JSON
+            let out = reds.map(r => ({id: r.id, index: r.index, name: r.name, unread: r.unread}));
             out._debug = debug;
             return JSON.stringify(out);
         """)
         result = json.loads(raw) if raw else []
-        # 每20次循环输出一次调试信息（避免刷屏）
         if not hasattr(self, '_scan_count'): self._scan_count = 0
         self._scan_count += 1
-        if self._scan_count % 4 == 1:
-            dbg = result.get('_debug', {}) if isinstance(result, dict) else {}
+        if self._scan_count % 3 == 1:
             cleaned = [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
             if not cleaned:
-                self.log(f"扫描: 页面元素{dbg.get('total','?')}个, 未发现红点")
+                self.log(f"扫描: 找到0个有效红点")
+            elif len(cleaned) > 0:
+                names = [r.get('name','?')[:10] for r in cleaned[:5]]
+                self.log(f"扫描到{len(cleaned)}个红点: {', '.join(names)}")
             return cleaned
         return [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
 
     def _click_red_item(self, driver, name):
-        """点击红点对话——找带数字的 sup/span，点击其父元素"""
-        clicked = driver.execute_script("""
-            // 找到所有 sup 标签（通常是红点数字）
-            let badges = document.querySelectorAll('sup, span[class*="count"], span[class*="num"]');
-            for (let b of badges) {
+        """点击红点对话——通过badge定位父级并点击"""
+        clicked = driver.execute_script(f"""
+            let name = {json.dumps(name, ensure_ascii=False)};
+            // 找所有有红点数字的badge
+            let badges = document.querySelectorAll('sup, [class*="badge"], [class*="unread"], [class*="count"]');
+            for (let b of badges) {{
                 let t = b.textContent.trim();
-                if (t && /\\d/.test(t)) {
-                    // 向上找到可点击的父级（对话列表项）
-                    let item = b;
-                    for (let depth = 0; depth < 5 && item; depth++) {
-                        if (item.tagName === 'DIV' && item.className) {
-                            let text = item.textContent || '';
-                            if (text.length > 2 && text.length < 200 && !text.includes('群聊')) {
-                                item.click();
-                                return JSON.stringify({ok: true, name: text.substring(0,20)});
-                            }
-                        }
-                        item = item.parentElement;
-                    }
-                }
-            }
-            return JSON.stringify({ok: false});
+                if (!t || !/\\d/.test(t)) continue;
+                // 向上找父级——找高度适中的div（30-200px，典型列表项高度）
+                let p = b.parentElement;
+                for (let depth = 0; depth < 8 && p; depth++) {{
+                    if (p.tagName === 'DIV' || p.tagName === 'LI') {{
+                        let rect = p.getBoundingClientRect();
+                        if (rect.height > 25 && rect.height < 200 && !p.textContent.includes('群聊')) {{
+                            // 不要点到设置、系统消息
+                            let txt = p.textContent;
+                            if (txt.length < 2 || txt.length > 80) {{ p = p.parentElement; continue; }}
+                            if (/设置|隐私|帮助|反馈/.test(txt)) {{ p = p.parentElement; continue; }}
+                            // 点击！
+                            p.click();
+                            // 验证是否进入了对话
+                            setTimeout(function() {{}}, 500);
+                            return JSON.stringify({{ok: true, clicked: txt.substring(0,20)}});
+                        }}
+                    }}
+                    p = p.parentElement;
+                }}
+            }}
+            return JSON.stringify({{ok: false}});
         """)
         result = json.loads(clicked) if clicked else {"ok": False}
+        if result.get("ok"):
+            self.log(f"✓ 已点击进入: {result.get('clicked','?')}")
+        else:
+            self.log(f"✗ 点击失败: 未找到可点击的红点元素")
         return result.get("ok", False)
 
     def _back_to_list(self, driver):
