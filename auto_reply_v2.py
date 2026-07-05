@@ -114,31 +114,61 @@ class AccountWorker(QThread):
         self._stop = True
 
     def _scan_reds(self, driver):
-        """扫描红点，跳过群聊"""
+        """扫描红点——多种选择器兜底，跳过群聊"""
         raw = driver.execute_script("""
             let reds = [];
+            let debug = {total: 0, withBadge: 0};
             try {
-                let items = document.querySelectorAll('[class*="conversation"], [class*="session"], div[class*="Cov"]');
+                // 查找私信列表项：尝试多种可能的class名
+                let items = document.querySelectorAll(
+                    '[class*="conversation"], [class*="session"], [class*="chat-item"], ' +
+                    '[class*="contact-item"], [class*="list-item"], [class*="message-item"], ' +
+                    'div[class*="Cov"], [class*="user-item"], li[class*="item"]'
+                );
+                // 如果什么都没找到，说明抖音用了完全不同的结构，尝试所有div
+                if (items.length < 2) {
+                    items = document.querySelectorAll('div[class]');
+                }
+                debug.total = items.length;
+
                 for (let i = 0; i < items.length; i++) {
                     let el = items[i];
                     let text = (el.textContent || '').trim();
-                    if (text.includes('群聊') || text.includes('群')) continue;
-                    let badge = el.querySelector('sup, [class*="badge"], [class*="unread"], [class*="count"]');
+                    if (!text || text.length > 300) continue;
+                    if (text.includes('群聊')) continue;
+
+                    // 找红点：sup标签、带数字的span/div、红色背景的小元素
+                    let badge = el.querySelector(
+                        'sup, [class*="badge"], [class*="unread"], [class*="count"], ' +
+                        '[class*="num"], [class*="red"], [class*="dot"]'
+                    );
                     if (badge) {
                         let t = badge.textContent.trim();
-                        if (t && /\\d/.test(t)) {
-                            let cid = el.getAttribute('data-conversation-id') || el.getAttribute('data-id') || ('cid_'+i);
+                        if (t && (/\\d/.test(t) || t === 'new' || t === '新')) {
+                            debug.withBadge++;
+                            let cid = el.getAttribute('data-id') || el.getAttribute('data-key') || ('cid_'+i);
                             let name = '';
-                            let sp = el.querySelector('span, [class*="name"]');
+                            let sp = el.querySelector('span, [class*="name"], [class*="nick"]');
                             if (sp) name = sp.textContent.trim().substring(0,15);
-                            reds.push({id: cid, index: i, name: name || '用户', unread: t});
+                            reds.push({id: cid, index: i, name: name || text.substring(0,12), unread: t});
                         }
                     }
                 }
             } catch(e) {}
+            reds._debug = debug;
             return JSON.stringify(reds);
         """)
-        return json.loads(raw) if raw else []
+        result = json.loads(raw) if raw else []
+        # 每20次循环输出一次调试信息（避免刷屏）
+        if not hasattr(self, '_scan_count'): self._scan_count = 0
+        self._scan_count += 1
+        if self._scan_count % 4 == 1:
+            dbg = result.get('_debug', {}) if isinstance(result, dict) else {}
+            cleaned = [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
+            if not cleaned:
+                self.log(f"扫描: 页面元素{dbg.get('total','?')}个, 未发现红点")
+            return cleaned
+        return [r for r in (result if isinstance(result, list) else []) if isinstance(r, dict) and 'id' in r]
 
     def _back_to_list(self, driver):
         """退回消息列表（只在对话框内时操作）"""
@@ -272,10 +302,15 @@ class AccountWorker(QThread):
                         if cid in replied_ids: continue
                         replied_ids.add(cid)
 
-                        # 点进去
+                        # 点进去——用和扫描时相同的选择器
                         clicked = driver.execute_script(f"""
                             try {{
-                                let items = document.querySelectorAll('[class*="conversation"], [class*="session"], div[class*="Cov"]');
+                                let items = document.querySelectorAll(
+                                    '[class*="conversation"], [class*="session"], [class*="chat-item"], ' +
+                                    '[class*="contact-item"], [class*="list-item"], [class*="message-item"], ' +
+                                    'div[class*="Cov"], [class*="user-item"], li[class*="item"]'
+                                );
+                                if (items.length < 2) items = document.querySelectorAll('div[class]');
                                 items[{red['index']}].click();
                                 return true;
                             }} catch(e) {{ return false; }}
