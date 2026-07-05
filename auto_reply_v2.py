@@ -325,20 +325,59 @@ class AccountWorker(QThread):
                             continue
                         seen_counts[cid] = count
 
-                        # 点进去
-                        clicked = driver.execute_script(f"""
-                            try {{
+                        # 点击红点对话——多种方式兜底
+                        clicked = False
+                        # 方式1：按名字匹配
+                        name = red.get("name", "")
+                        if name:
+                            clicked = driver.execute_script(f"""
+                                let name = {json.dumps(name)};
+                                let items = document.querySelectorAll('div[class]');
+                                for (let el of items) {{
+                                    if (el.textContent.includes(name) && !el.textContent.includes('群聊')) {{
+                                        let badge = el.querySelector('sup, [class*="badge"], [class*="unread"]');
+                                        if (badge) {{ el.click(); return true; }}
+                                    }}
+                                }}
+                                return false;
+                            """)
+                        # 方式2：按索引点击（和扫描用同一套选择器）
+                        if not clicked:
+                            clicked = driver.execute_script(f"""
                                 let items = document.querySelectorAll(
                                     '[class*="conversation"], [class*="session"], [class*="chat-item"], ' +
                                     '[class*="contact-item"], [class*="list-item"], [class*="message-item"], ' +
                                     'div[class*="Cov"], [class*="user-item"], li[class*="item"]'
                                 );
                                 if (items.length < 2) items = document.querySelectorAll('div[class]');
-                                items[{red['index']}].click();
-                                return true;
-                            }} catch(e) {{ return false; }}
-                        """)
-                        if not clicked: continue
+                                for (let i = 0; i < items.length; i++) {{
+                                    let b = items[i].querySelector('sup, [class*="badge"], [class*="unread"]');
+                                    if (b) {{ items[i].click(); return true; }}
+                                }}
+                                return false;
+                            """)
+                        # 方式3：直接用Selenium查找带红点的元素并点击
+                        if not clicked:
+                            try:
+                                from selenium.webdriver.common.by import By
+                                all_divs = driver.find_elements(By.CSS_SELECTOR, "div[class]")
+                                for el in all_divs:
+                                    try:
+                                        text = el.text or ""
+                                        if name and name in text and "群聊" not in text:
+                                            badges = el.find_elements(By.CSS_SELECTOR, "sup, [class*='badge'], [class*='unread']")
+                                            if badges:
+                                                el.click()
+                                                clicked = True
+                                                break
+                                    except:
+                                        continue
+                            except:
+                                pass
+
+                        if not clicked:
+                            continue
+                        self.log(f"点击 {name} 成功，等待加载")
                         time.sleep(3)
 
                         # 读最后一条消息——尝试多种选择器
