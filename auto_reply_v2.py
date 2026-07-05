@@ -152,19 +152,22 @@ class AccountWorker(QThread):
             self.status_signal.emit(self.name, "监控中")
             self.log("✅ 开始监控")
 
-            seen_counts = {}
+            # 用最近回复时间追踪（名字作key，稳定不受DOM顺序影响）
+            last_reply_time = {}
 
             while not self._stop:
                 reds = self._scan_reds(driver)
 
                 for red in reds:
                     if self._stop: break
-                    cid = red.get("id")
+                    name = red.get("name", "用户")
                     count = int(red.get("unread", "1")) if red.get("unread","1").isdigit() else 1
-                    if cid in seen_counts and count <= seen_counts[cid]:
+
+                    # 30秒内刚回过这个对话，跳过（防止连发）
+                    now = time.time()
+                    if name in last_reply_time and now - last_reply_time[name] < 30:
                         continue
 
-                    name = red.get("name", "用户")
                     self.log(f"点击红点: {name}({count}条)")
 
                     # 点击对话 — 已验证成功的 focus > mousedown > mouseup > click 事件链
@@ -192,17 +195,6 @@ class AccountWorker(QThread):
                         continue
                     time.sleep(2)
 
-                    # 确认红点消失 + 输入框出现
-                    badge_gone = driver.execute_script("""
-                        let b = document.querySelector('span[class*="ConversationItemUnRead"]');
-                        let inp = document.querySelector('div[contenteditable="true"], textarea');
-                        return !b && !!inp;
-                    """)
-                    if not badge_gone:
-                        self._back_to_list(driver)
-                        continue
-                    time.sleep(1)
-
                     # 读消息
                     last_msg = driver.execute_script("""
                         let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
@@ -217,8 +209,7 @@ class AccountWorker(QThread):
                     if reply_text and self._send_reply(driver, reply_text):
                         self.log(f"📤 回复{name}: {reply_text[:30]} [{rule}]")
                         self._write_log(name, last_msg, reply_text)
-                        if cid in seen_counts: del seen_counts[cid]
-                        seen_counts[cid] = count
+                        last_reply_time[name] = time.time()
                         time.sleep(1)
 
                     self._back_to_list(driver)
