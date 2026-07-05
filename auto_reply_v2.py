@@ -153,22 +153,32 @@ class AccountWorker(QThread):
         """)
 
     def _send_reply(self, driver, text):
-        """发送回复"""
-        driver.execute_script(f"""
-            let r = {json.dumps(text, ensure_ascii=False)};
-            let inp = document.querySelector('textarea, [contenteditable="true"], div[contenteditable]');
-            if (!inp) inp = document.querySelector('[class*="input"], [class*="editor"]');
-            if (inp) {{
-                if (inp.tagName === 'TEXTAREA') inp.value = r;
-                else inp.textContent = r;
-                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-            }}
-        """)
-        time.sleep(0.5)
+        """定位输入框 → 键盘逐字输入 → Enter 发送"""
+        # 精准找输入框：在页面下半部分、高度适中的 contenteditable div
         driver.execute_script("""
-            let inp = document.querySelector('textarea, [contenteditable="true"]');
-            if (inp) inp.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',code:'Enter',bubbles:true}));
+            let inp = null;
+            let all = document.querySelectorAll('div[contenteditable="true"], textarea');
+            for (let el of all) {
+                let r = el.getBoundingClientRect();
+                if (r.height > 20 && r.height < 200 && r.top > window.innerHeight * 0.35) {
+                    inp = el; break;
+                }
+            }
+            if (!inp) {
+                inp = document.querySelector('div[data-placeholder]') || document.querySelector('div[class*="rich-input"]');
+            }
+            if (inp) { inp.focus(); inp.click(); window._lastInput = inp; }
+            return !!inp;
         """)
+        time.sleep(0.3)
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
+        actions = ActionChains(driver)
+        for ch in text:
+            actions.send_keys(ch)
+        actions.pause(0.3)
+        actions.send_keys(Keys.ENTER)
+        actions.perform()
 
     def _write_log(self, sender, msg_in, msg_out):
         """写入CSV日志"""
