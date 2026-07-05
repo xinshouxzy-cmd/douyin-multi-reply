@@ -136,12 +136,11 @@ class AccountWorker(QThread):
                         if (text.length < 2 || text.length > 80) continue;
                         if (/设置|隐私|帮助|反馈|举报|屏蔽|客服/.test(text)) continue;
                         if (text.includes('群聊')) continue;
-                        // 必须有badge
-                        let badge = el.querySelector('sup, [class*="badge"], [class*="unread"], ' +
-                            '[class*="count"], [class*="num"], [class*="red"]');
+                        // 必须有badge——红点是 SPAN 标签（不是sup），无class，内容是纯数字
+                        let badge = el.querySelector('span:not([class])');
                         if (!badge) continue;
                         let bt = badge.textContent.trim();
-                        if (!bt || !(/\\d/.test(bt) || bt === '新')) continue;
+                        if (!bt || !/^\\d+$/.test(bt)) continue;
 
                         debug.withBadge++;
                         // 提取名字：取第一个最短的、看起来像用户名的文本片段
@@ -186,18 +185,19 @@ class AccountWorker(QThread):
 
     def _click_red_item(self, driver, name):
         """点击红点对话——通过badge定位父级并点击"""
-        # 先用Selenium直接找sup元素并点击
+        # 红点是 SPAN 标签（无class，纯数字），不是 sup
         try:
             from selenium.webdriver.common.by import By
-            sups = driver.find_elements(By.TAG_NAME, "sup")
-            for sup in sups:
+            spans = driver.find_elements(By.TAG_NAME, "span")
+            for sp in spans:
                 try:
-                    t = sup.text.strip()
-                    if t and t.isdigit():
-                        # 点这个sup本身
-                        sup.click()
+                    t = sp.text.strip()
+                    cls = sp.get_attribute("class") or ""
+                    if t.isdigit() and not cls:
+                        # 找到了红点SPAN，点击它的父级DIV
+                        parent = sp.find_element(By.XPATH, "..")
+                        parent.click()
                         time.sleep(0.5)
-                        # 检查是否进入了对话（有输入框）
                         inputs = driver.find_elements(By.CSS_SELECTOR, 'div[contenteditable="true"], textarea')
                         if inputs:
                             self.log(f"✓ 点击进入: {name}")
@@ -207,30 +207,27 @@ class AccountWorker(QThread):
         except:
             pass
 
-        # 备用：JS方式点击
-        clicked = driver.execute_script(f"""
-            let name = {json.dumps(name, ensure_ascii=False)};
-            let badges = document.querySelectorAll('sup, [class*="badge"], [class*="unread"], [class*="count"]');
-            for (let b of badges) {{
-                let t = b.textContent.trim();
-                if (!t || !/\\d/.test(t)) continue;
-                let p = b.parentElement;
-                for (let d = 0; d < 8 && p; d++) {{
-                    if (p.tagName === 'DIV' || p.tagName === 'LI') {{
-                        let r = p.getBoundingClientRect();
-                        if (r.height > 25 && r.height < 200) {{
-                            let txt = p.textContent.trim();
-                            if (txt.length > 2 && txt.length < 80 && !/设置|隐私|帮助|反馈/.test(txt)) {{
-                                p.click();
-                                setTimeout(function(){{}}, 500);
-                                return JSON.stringify({{ok: true}});
-                            }}
-                        }}
-                    }}
+        # 备用：JS方式点击 SPAN 红点
+        clicked = driver.execute_script("""
+            let spans = document.querySelectorAll('SPAN');
+            for (let s of spans) {
+                let t = s.textContent.trim();
+                let cls = s.className || '';
+                if (!/^\\d+$/.test(t) || cls.length > 0) continue;
+                let p = s.parentElement;
+                for (let d = 0; d < 8 && p; d++) {
+                    if (p.tagName === 'DIV') {
+                        let ptxt = p.textContent.trim();
+                        if (ptxt.length > 0 && ptxt.length < 80 && !ptxt.includes('群聊') && !/\\d{2}:\\d{2}/.test(ptxt)) {
+                            p.click();
+                            setTimeout(function(){}, 300);
+                            return JSON.stringify({ok: true});
+                        }
+                    }
                     p = p.parentElement;
-                }}
-            }}
-            return JSON.stringify({{ok: false}});
+                }
+            }
+            return JSON.stringify({ok: false});
         """)
         result = json.loads(clicked) if clicked else {"ok": False}
         return result.get("ok", False)
