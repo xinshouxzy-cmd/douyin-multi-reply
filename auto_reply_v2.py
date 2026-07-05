@@ -186,28 +186,45 @@ class AccountWorker(QThread):
 
     def _click_red_item(self, driver, name):
         """点击红点对话——通过badge定位父级并点击"""
+        # 先用Selenium直接找sup元素并点击
+        try:
+            from selenium.webdriver.common.by import By
+            sups = driver.find_elements(By.TAG_NAME, "sup")
+            for sup in sups:
+                try:
+                    t = sup.text.strip()
+                    if t and t.isdigit():
+                        # 点这个sup本身
+                        sup.click()
+                        time.sleep(0.5)
+                        # 检查是否进入了对话（有输入框）
+                        inputs = driver.find_elements(By.CSS_SELECTOR, 'div[contenteditable="true"], textarea')
+                        if inputs:
+                            self.log(f"✓ 点击进入: {name}")
+                            return True
+                except:
+                    continue
+        except:
+            pass
+
+        # 备用：JS方式点击
         clicked = driver.execute_script(f"""
             let name = {json.dumps(name, ensure_ascii=False)};
-            // 找所有有红点数字的badge
             let badges = document.querySelectorAll('sup, [class*="badge"], [class*="unread"], [class*="count"]');
             for (let b of badges) {{
                 let t = b.textContent.trim();
                 if (!t || !/\\d/.test(t)) continue;
-                // 向上找父级——找高度适中的div（30-200px，典型列表项高度）
                 let p = b.parentElement;
-                for (let depth = 0; depth < 8 && p; depth++) {{
+                for (let d = 0; d < 8 && p; d++) {{
                     if (p.tagName === 'DIV' || p.tagName === 'LI') {{
-                        let rect = p.getBoundingClientRect();
-                        if (rect.height > 25 && rect.height < 200 && !p.textContent.includes('群聊')) {{
-                            // 不要点到设置、系统消息
-                            let txt = p.textContent;
-                            if (txt.length < 2 || txt.length > 80) {{ p = p.parentElement; continue; }}
-                            if (/设置|隐私|帮助|反馈/.test(txt)) {{ p = p.parentElement; continue; }}
-                            // 点击！
-                            p.click();
-                            // 验证是否进入了对话
-                            setTimeout(function() {{}}, 500);
-                            return JSON.stringify({{ok: true, clicked: txt.substring(0,20)}});
+                        let r = p.getBoundingClientRect();
+                        if (r.height > 25 && r.height < 200) {{
+                            let txt = p.textContent.trim();
+                            if (txt.length > 2 && txt.length < 80 && !/设置|隐私|帮助|反馈/.test(txt)) {{
+                                p.click();
+                                setTimeout(function(){{}}, 500);
+                                return JSON.stringify({{ok: true}});
+                            }}
                         }}
                     }}
                     p = p.parentElement;
@@ -216,10 +233,6 @@ class AccountWorker(QThread):
             return JSON.stringify({{ok: false}});
         """)
         result = json.loads(clicked) if clicked else {"ok": False}
-        if result.get("ok"):
-            self.log(f"✓ 已点击进入: {result.get('clicked','?')}")
-        else:
-            self.log(f"✗ 点击失败: 未找到可点击的红点元素")
         return result.get("ok", False)
 
     def _back_to_list(self, driver):
