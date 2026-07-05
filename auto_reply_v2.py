@@ -87,9 +87,9 @@ def get_driver_path():
 # ====== 工作线程 ======
 
 class AccountWorker(QThread):
-    log_signal = pyqtSignal(str, str)  # account_name, message
-    status_signal = pyqtSignal(str, str)  # account_name, status
-    reply_signal = pyqtSignal(str, str, str)  # account_name, incoming, reply
+    log_signal = pyqtSignal(str, str)
+    status_signal = pyqtSignal(str, str)
+    reply_signal = pyqtSignal(str, str, str)
 
     def __init__(self, account_config, account_index):
         super().__init__()
@@ -101,6 +101,11 @@ class AccountWorker(QThread):
         self.default_reply = account_config.get("default_reply", "")
         self.poll = account_config.get("poll_interval", 5)
         self._stop = False
+        self._login_ok = threading.Event()
+        self._replied = set()
+
+    def confirm_login(self):
+        self._login_ok.set()
 
     def log(self, msg):
         self.log_signal.emit(self.name, msg)
@@ -235,12 +240,16 @@ class AccountWorker(QThread):
 
         try:
             driver.get("https://www.douyin.com")
-            self.log("Chrome 已打开，请扫码登录")
+            self.log("Chrome 已打开，请扫码登录，然后手动进入「消息」页面")
             self.status_signal.emit(self.name, "等待登录")
 
-            # 等待用户手动登录并点进消息页
-            self.log("登录后请手动点进「消息」页面，程序自动检测新消息")
-            time.sleep(8)  # 给用户时间操作
+            # 等待用户点击「确认已登录」
+            self.log("完成后请点击软件上的「确认已登录」按钮")
+            while not self._login_ok.is_set() and not self._stop:
+                time.sleep(0.5)
+
+            if self._stop:
+                return
 
             self.status_signal.emit(self.name, "监控中")
             self.log("✅ 开始监控私信")
@@ -471,11 +480,16 @@ class MainWindow(QMainWindow):
         poll_row.addWidget(poll_input)
         poll_row.addStretch()
 
-        # 启动/停止按钮
+        # 启动/停止/确认按钮
         btn_start = QPushButton("▶ 启动")
         btn_start.setObjectName("btnStart")
         btn_start.clicked.connect(lambda _, idx=i: self._start_one(idx))
         poll_row.addWidget(btn_start)
+
+        btn_confirm = QPushButton("✓ 确认已登录")
+        btn_confirm.setStyleSheet("background:#25f4ee;color:#000;font-weight:bold;")
+        btn_confirm.clicked.connect(lambda _, idx=i: self._confirm_login(idx))
+        poll_row.addWidget(btn_confirm)
 
         btn_stop = QPushButton("⏹ 停止")
         btn_stop.clicked.connect(lambda _, idx=i: self._stop_one(idx))
@@ -577,6 +591,14 @@ class MainWindow(QMainWindow):
 
         self.workers[acc["name"]] = worker
         self.tabs[idx]["status"].setText("🟡 等待登录...")
+
+    def _confirm_login(self, idx):
+        nm = self.config["accounts"][idx]["name"]
+        if nm in self.workers:
+            self.workers[nm].confirm_login()
+            self.tabs[idx]["status"].setText("🟢 监控中")
+            self.tabs[idx]["status"].setStyleSheet("color:#25f4ee;")
+            self._log("系统", f"用户确认已登录，开始监控")
 
     def _stop_one(self, idx):
         acc_name = self.config["accounts"][idx]["name"]
