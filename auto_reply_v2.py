@@ -141,6 +141,9 @@ class AccountWorker(QThread):
                         if (!badge) continue;
                         let bt = badge.textContent.trim();
                         if (!bt || !/^\\d+$/.test(bt)) continue;
+                        // 排除视频时长（05:01）和播放量（>99 在视频卡片上）
+                        if (/\\d{2}:\\d{2}/.test(text)) continue;
+                        if (parseInt(bt) > 99) continue;
 
                         debug.withBadge++;
                         // 提取名字：取第一个最短的、看起来像用户名的文本片段
@@ -193,7 +196,7 @@ class AccountWorker(QThread):
                 try:
                     t = sp.text.strip()
                     cls = sp.get_attribute("class") or ""
-                    if t.isdigit() and not cls:
+                    if t.isdigit() and not cls and int(t) <= 99:
                         # 找到了红点SPAN，点击它的父级DIV
                         parent = sp.find_element(By.XPATH, "..")
                         parent.click()
@@ -371,6 +374,16 @@ class AccountWorker(QThread):
 
             while not self._stop:
                 try:
+                    # 仅在消息/私信页面扫描
+                    url = (driver.current_url or "").lower()
+                    if "/messages" not in url and "/im" not in url:
+                        # 不在消息页，自动跳转
+                        try:
+                            self.log("导航到消息页...")
+                            driver.get("https://www.douyin.com/messages")
+                            time.sleep(3)
+                        except:
+                            pass
                     reds = self._scan_reds(driver)
                     
                     for red in reds:
