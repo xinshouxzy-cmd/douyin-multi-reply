@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install pyinstaller selenium webdriver-manager PyQt5 pyqt5-tools
+        run: pip install pyinstaller selenium webdriver-manager PyQt5
       - name: Get chromedriver
         run: python -c "from webdriver_manager.chrome import ChromeDriverManager; p = ChromeDriverManager().install(); import shutil; shutil.copy(p, 'chromedriver.exe')"
       - name: Build
