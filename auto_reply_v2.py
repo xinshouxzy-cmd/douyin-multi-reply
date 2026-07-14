@@ -34,8 +34,7 @@ def load_rules():
             return json.load(f)
     return {"accounts": [
         {"name": "账号1", "enabled": True,
-         "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式，我们将安排客户经理与您联系~",
-         "poll_interval": 5}
+         "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式，我们将安排客户经理与您联系~"}
     ]}
 
 
@@ -74,7 +73,7 @@ class AccountWorker(QThread):
         self.idx = idx
         self.name = acc["name"]
         self.reply_text = acc.get("reply_text", "")
-        self.poll = acc.get("poll_interval", POLL)
+        self.poll = POLL
         self._stop = False
         self._login_ok = threading.Event()
         self._export_now = threading.Event()  # 手动导出触发
@@ -239,7 +238,11 @@ class AccountWorker(QThread):
                 """)
 
                 if first_name not in self.today_strangers:
-                    self.today_strangers[first_name] = {"first_msg": first_msg, "my_reply": self.reply_text}
+                    contact_time = time.strftime("%Y-%m-%d %H:%M")
+                    self.today_strangers[first_name] = {
+                        "first_msg": first_msg, "my_reply": self.reply_text,
+                        "contact_time": contact_time
+                    }
 
                 if self.reply_text and self._send_reply(driver, self.reply_text):
                     self.log(f"已回复: {first_name}")
@@ -413,11 +416,12 @@ class AccountWorker(QThread):
 
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["序号","陌生人昵称","对方消息","我方回复","对方后续回复","用户手机号码"])
+            w.writerow(["序号","陌生人昵称","联系时间","对方消息","我方回复","对方后续回复","用户手机号码"])
             for i, name in enumerate(names, 1):
                 info = self.today_strangers[name]
-                w.writerow([i, name, info.get("first_msg",""), info.get("my_reply",""),
-                           follow_up.get(name,""), phone_numbers.get(name,"")])
+                w.writerow([i, name, info.get("contact_time",""), info.get("first_msg",""),
+                           info.get("my_reply",""), follow_up.get(name,""),
+                           phone_numbers.get(name,"")])
 
         self.log(f"报告已保存: {os.path.basename(filepath)}")
         self.report_ready.emit(self.name, filepath)
@@ -427,29 +431,30 @@ class AccountWorker(QThread):
 # ===== GUI =====
 
 STYLE = """
-QMainWindow{background:#1e1e1e}QTabWidget::pane{border:1px solid #333;background:#252525}
-QTabBar::tab{background:#2d2d2d;color:#aaa;padding:8px 16px;border:none}
-QTabBar::tab:selected{background:#c41230;color:#fff}
-QTableWidget{background:#1a1a1a;color:#ddd;gridline-color:#333;border:1px solid #333}
-QHeaderView::section{background:#2d2d2d;color:#aaa;border:none;padding:4px}
-QLineEdit,QTextEdit{background:#2d2d2d;color:#ddd;border:1px solid #444;padding:4px;border-radius:4px}
-QPushButton{background:#3a3a3a;color:#ddd;border:none;padding:6px 14px;border-radius:4px}
-QPushButton:hover{background:#4a4a4a}
-QPushButton#btnStart{background:#c41230;color:#fff;font-weight:bold}
-QPushButton#btnStart:hover{background:#e01438}
-QPushButton#btnStop{background:#555}
-QPushButton#btnAdd{background:#25f4ee;color:#000}
-QLabel{color:#bbb}
-QGroupBox{color:#aaa;border:1px solid #333;border-radius:6px;margin-top:8px;padding-top:12px}
+QMainWindow{background:#0d1f14}QTabWidget::pane{border:1px solid #1a3a28;background:#132818}
+QTabBar::tab{background:#1a3522;color:#8DC891;padding:8px 16px;border:none}
+QTabBar::tab:selected{background:#006B3F;color:#fff;font-weight:bold}
+QTableWidget{background:#0f1f14;color:#ddd;gridline-color:#1a3a28;border:1px solid #1a3a28}
+QHeaderView::section{background:#1a3522;color:#8DC891;border:none;padding:4px}
+QLineEdit,QTextEdit{background:#172d1f;color:#ddd;border:1px solid #2a4a38;padding:6px;border-radius:4px}
+QPushButton{background:#1a3522;color:#ddd;border:1px solid #2a4a38;padding:6px 14px;border-radius:4px}
+QPushButton:hover{background:#234a30}
+QPushButton#btnStart{background:#D4AF37;color:#000;font-weight:bold;border:none}
+QPushButton#btnStart:hover{background:#e6c544}
+QPushButton#btnStop{background:#555;border:none}
+QPushButton#btnAdd{background:#006B3F;color:#fff;border:none}
+QPushButton#btnAdd:hover{background:#008a52}
+QLabel{color:#8DC891}
+QGroupBox{color:#8DC891;border:1px solid #1a3a28;border-radius:6px;margin-top:8px;padding-top:12px}
 QGroupBox::title{subcontrol-origin:margin;left:12px}
-QStatusBar{background:#2d2d2d;color:#aaa}
+QStatusBar{background:#0f1f14;color:#8DC891}
 """
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("抖音多账号自动回复 v22 · 仅陌生人 - 遵义农商银行")
+        self.setWindowTitle("遵义农商银行 · 辛振宇 · 抖音私信智能助手")
         self.setGeometry(100, 100, 1050, 620)
         self.setStyleSheet(STYLE)
         self.config = load_rules()
@@ -457,10 +462,15 @@ class MainWindow(QMainWindow):
         self.tabs = {}
         self._build_ui()
         self._refresh_tabs()
-        self.statusBar().showMessage("就绪")
+        self.statusBar().showMessage("遵义农商银行 · 新媒体部 · 辛振宇 | 就绪")
 
     def _build_ui(self):
         c = QWidget(); self.setCentralWidget(c); ml = QVBoxLayout(c)
+        # 品牌头部
+        hdr = QLabel(" 遵义农商银行 · 新媒体部 · 辛振宇")
+        hdr.setStyleSheet("background:#006B3F;color:#D4AF37;font-size:14px;font-weight:bold;padding:8px;")
+        hdr.setFixedHeight(36)
+        ml.addWidget(hdr)
         top = QHBoxLayout()
         b = QPushButton("+ 添加账号"); b.setObjectName("btnAdd"); b.clicked.connect(self._add_account); top.addWidget(b)
         b = QPushButton("💾 保存"); b.clicked.connect(self._save); top.addWidget(b)
@@ -489,8 +499,7 @@ class MainWindow(QMainWindow):
         rp = QLineEdit(a.get("reply_text", "")); r2.addWidget(rp); l.addLayout(r2)
 
         r4 = QHBoxLayout()
-        r4.addWidget(QLabel("间隔(秒):")); pi = QLineEdit(str(a.get("poll_interval", 5)))
-        pi.setMaximumWidth(50); r4.addWidget(pi); r4.addStretch()
+        r4.addStretch()
         b = QPushButton("▶ 启动"); b.setObjectName("btnStart"); b.clicked.connect(lambda _, x=i: self._start(x)); r4.addWidget(b)
         b = QPushButton("✓ 确认已登录"); b.setStyleSheet("background:#25f4ee;color:#000;font-weight:bold;")
         b.clicked.connect(lambda _, x=i: self._confirm_login(x)); r4.addWidget(b)
@@ -503,14 +512,13 @@ class MainWindow(QMainWindow):
         b.clicked.connect(lambda _, x=i: self._del(x)); r5.addWidget(b); l.addLayout(r5)
 
         self.tab_w.addTab(t, a.get("name", f"账号{i+1}"))
-        self.tabs[i] = {"name": nm, "enabled": en, "status": st, "reply": rp, "poll": pi}
+        self.tabs[i] = {"name": nm, "enabled": en, "status": st, "reply": rp}
 
     def _add_account(self):
         n = len(self.config["accounts"]) + 1
         self.config["accounts"].append({
             "name": f"账号{n}", "enabled": True,
-            "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式~",
-            "poll_interval": 5
+            "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式~"
         })
         self._refresh_tabs(); self._log("系统", f"已添加账号{n}")
 
@@ -523,7 +531,7 @@ class MainWindow(QMainWindow):
         return {
             "name": t["name"].text(), "enabled": t["enabled"].isChecked(),
             "reply_text": t["reply"].text(),
-            "poll_interval": int(t["poll"].text()) if t["poll"].text().isdigit() else 5
+            "reply_text": t["reply"].text()
         }
 
     def _save(self):
