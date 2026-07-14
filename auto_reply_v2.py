@@ -154,25 +154,12 @@ class AccountWorker(QThread):
                     self._in_stranger = False  # 强制退出陌生人，回首页
                     self._generate_report()
                     self.log("✅ 导出完成，继续监控")
-                    continue  # 重新检测陌生人消息
+                    continue
                 if not self._in_stranger:
-                    clicked = driver.execute_script("""
-                        let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
-                        for (let el of items) {
-                            if ((el.textContent||'').includes('陌生人消息')) {
-                                el.focus();
-                                ['mousedown','mouseup','click'].forEach(e =>
-                                    el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                                );
-                                return true;
-                            }
-                        }
-                        return false;
-                    """)
-                    if clicked:
-                        time.sleep(3)
+                    entered = self._enter_stranger(driver)
+                    if entered:
                         self._in_stranger = True
-                        self.log("🚪 进入陌生人消息")
+                        self.log("🚪 已进入陌生人消息")
                     else:
                         time.sleep(self.poll)
                         continue
@@ -247,6 +234,80 @@ class AccountWorker(QThread):
             self.status_signal.emit(self.name, "已停止")
 
     def _scan_reds(self, driver):
+        raw = driver.execute_script("""
+            let reds=[];let idx=0;
+            try{
+                let badges=document.querySelectorAll('span[class*="ConversationItemUnRead"]');
+                badges.forEach(b=>{
+                    let t=b.textContent.trim();
+                    if(!t||!/^\\d+$/.test(t))return;
+                    let item=b;
+                    for(let d=0;d<10&&item;d++){
+                        item=item.parentElement;if(!item)break;
+                        if(item.className&&item.className.includes('conversationConversationItem')){
+                            let name=(item.textContent||'').split(/[\\s\\n]/)[0].substring(0,15);
+                            if(!name.includes('陌生人'))reds.push({name:name,unread:t});idx++;break;
+                        }
+                    }
+                });
+            }catch(e){}
+            return JSON.stringify(reds);
+        """)
+        result = json.loads(raw) if raw else []
+        return [r for r in result if isinstance(r, dict)]
+
+    def _enter_stranger(self, driver):
+        """点击「陌生人消息」并验证已进入。返回 True=成功进入"""
+        # 1. 在主私信列表找到「陌生人消息」并点击
+        clicked = driver.execute_script("""
+            let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
+            for (let el of items) {
+                if ((el.textContent||'').includes('陌生人消息')) {
+                    el.scrollIntoView({block:'center'});
+                    el.focus();
+                    ['mousedown','mouseup','click'].forEach(e =>
+                        el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                    );
+                    return true;
+                }
+            }
+            return false;
+        """)
+        if not clicked:
+            return False
+
+        time.sleep(3)
+
+        # 2. 验证：进入后页面顶部应有「陌生人消息」标题，且对话列表里是个体用户(非群组)
+        inside = driver.execute_script("""
+            // 方法1: 检查页面是否显示了独立的陌生人列表（对话项是个人名）
+            let items = document.querySelectorAll('[class*="conversationConversationItem"]');
+            let hasIndividuals = false;
+            for (let el of items) {
+                let txt = (el.textContent||'').trim();
+                // 排除「陌生人消息」这个群组入口本身
+                if (txt && txt.length > 0 && !txt.includes('陌生人消息') && !txt.includes('陌生人')) {
+                    hasIndividuals = true;
+                    break;
+                }
+            }
+            // 方法2: 检查面包屑/标题
+            let headers = document.querySelectorAll('[class*="title"], [class*="header"], [class*="breadcrumb"]');
+            let hasTitle = false;
+            for (let h of headers) {
+                if ((h.textContent||'').includes('陌生人消息')) {
+                    hasTitle = true;
+                    break;
+                }
+            }
+            return hasIndividuals || hasTitle;
+        """)
+
+        if not inside:
+            self.log("⚠️ 点击了但未进入陌生人消息，重试...")
+            return False
+
+        return True
         raw = driver.execute_script("""
             let reds=[];let idx=0;
             try{
