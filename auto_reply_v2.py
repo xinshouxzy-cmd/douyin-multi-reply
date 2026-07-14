@@ -181,25 +181,30 @@ class AccountWorker(QThread):
                         continue
 
                 # ─── 在陌生人列表内：验证+只回复第一个 ───
-                # 验证：第一条对话项x坐标<0说明已进入陌生人子页面
+                # 验证：右侧出现陌生人标题 panel（x>0）
                 still_in = driver.execute_script("""
-                    let first = document.querySelector('[class*="conversationConversationItem"]');
-                    if (!first) return false;
-                    let r = first.getBoundingClientRect();
-                    return r.x < -100;
+                    let title = document.querySelector('[class*="conversationStrangerConversationListtitl"]');
+                    if (!title) return false;
+                    let r = title.getBoundingClientRect();
+                    return r.x > 0 && r.width > 50;
                 """)
                 if not still_in:
                     self._in_stranger = False
                     self.log("不在陌生人列表，重新检测...")
                     continue
 
-                # 获取第一个陌生人
+                # 找第一个陌生人（x>0的对话项）
                 first_name = driver.execute_script("""
-                    let first = document.querySelector('[class*="conversationConversationItem"]');
-                    if (!first) return '';
-                    let txt = first.textContent || '';
-                    let parts = txt.split(/[\\s\\n]+/).filter(p => p.length > 1);
-                    return (parts[0] || '').substring(0, 15);
+                    let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
+                    for (let el of items) {
+                        let r = el.getBoundingClientRect();
+                        if (r.x > 0 && r.width > 100) {
+                            let txt = el.textContent || '';
+                            let name = txt.split(/[\\s\\n0-9]+/).filter(p => p.length > 1)[0] || '';
+                            return name.substring(0, 15);
+                        }
+                    }
+                    return '';
                 """)
 
                 if not first_name:
@@ -213,15 +218,20 @@ class AccountWorker(QThread):
 
                 self.log(f"回复: {first_name}")
 
-                # 点击第一个（在陌生人页面里，对话项x坐标为负，但存在且可点击）
+                # 点击第一个陌生人（x>0的那个）
                 ok = driver.execute_script("""
-                    let first = document.querySelector('[class*="conversationConversationItem"]');
-                    if (!first) return false;
-                    first.focus();
-                    ['mousedown','mouseup','click'].forEach(e =>
-                        first.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                    );
-                    return true;
+                    let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
+                    for (let el of items) {
+                        let r = el.getBoundingClientRect();
+                        if (r.x > 0 && r.width > 100) {
+                            el.focus();
+                            ['mousedown','mouseup','click'].forEach(e =>
+                                el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                            );
+                            return true;
+                        }
+                    }
+                    return false;
                 """)
                 if not ok: continue
                 time.sleep(2)
