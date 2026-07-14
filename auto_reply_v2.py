@@ -150,6 +150,7 @@ class AccountWorker(QThread):
             self.status_signal.emit(self.name, "监控中")
             self.log("✅ 等待陌生人消息...")
             last_reply_time = {}
+            last_refresh = time.time()
 
             while not self._stop:
                 # 手动导出触发
@@ -162,6 +163,11 @@ class AccountWorker(QThread):
                         self.log(f"导出: {os.path.basename(fp)}")
                     continue
                 if not self._in_stranger:
+                    # 每60秒刷新一次私信首页，确保陌生人消息出现
+                    if time.time() - last_refresh > 60:
+                        driver.refresh()
+                        time.sleep(3)
+                        last_refresh = time.time()
                     entered = self._enter_stranger(driver)
                     if entered:
                         self._in_stranger = True
@@ -314,9 +320,7 @@ class AccountWorker(QThread):
         """)
         return inside
 
-        return True
-
-    def _scan_reds(self, driver):
+    def _back_to_list(self, driver):
         driver.execute_script("""
             let back=document.querySelector('[class*="back"], [class*="return"], [class*="arrow"]');
             if(back){back.closest('div,button,span').click();return;}
