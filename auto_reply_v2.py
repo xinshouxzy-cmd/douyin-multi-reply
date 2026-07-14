@@ -97,6 +97,13 @@ class AccountWorker(QThread):
     def log(self, msg):
         self.log_signal.emit(self.name, msg)
 
+    def _clean_name(self, raw):
+        """去掉时间后缀：刚刚/分钟前/小时前/昨天/HH:MM/月日"""
+        return re.sub(
+            r'(刚刚|\d+分钟前|\d+小时前|昨天|\d{1,2}:\d{2}|\d{1,2}月\d{1,2}日|\d{2}/\d{2})$',
+            '', raw
+        ).strip()
+
     def run(self):
         try:
             from selenium import webdriver
@@ -194,27 +201,30 @@ class AccountWorker(QThread):
                     self.log("不在陌生人列表，重新检测...")
                     continue
 
-                # 找第一个陌生人（陌生人列表容器内）并点击
+                # 找第一个陌生人（陌生人列表容器内）并点击，返回干净昵称
                 clicked = driver.execute_script("""
                     let list = document.querySelector('[class*="conversationStrangerConversationListlist"]');
                     if (!list) return '';
                     let items = list.querySelectorAll('[class*="conversationConversationItemwrapper"]');
                     if (items.length === 0) return '';
                     let first = items[0];
-                    let txt = first.textContent || '';
+                    let title = first.querySelector('[class*="conversationConversationItemtitle"]');
+                    let name = title ? title.textContent.trim() : '';
                     first.focus();
                     ['mousedown','mouseup','click'].forEach(e =>
                         first.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
                     );
-                    return txt.split(/[\\s\\n]+/).filter(p => p.length > 1)[0] || '';
+                    return name;
                 """)
 
                 if not clicked:
                     time.sleep(self.poll)
                     continue
 
-                first_name = clicked[:15]
-                now = time.time()
+                first_name = self._clean_name(clicked)
+                if not first_name:
+                    time.sleep(self.poll)
+                    continue
                 if first_name in last_reply_time and now - last_reply_time[first_name] < 30:
                     time.sleep(self.poll)
                     continue
@@ -345,12 +355,13 @@ class AccountWorker(QThread):
 
         for name in names:
             try:
-                # 在主列表找匹配的对话项
+                # 在主列表按昵称匹配（用title精准匹配）
+                clean = self._clean_name(name)
                 found = driver.execute_script("""
                     let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
                     for (let el of items) {
-                        let txt = el.textContent || '';
-                        if (txt.includes(arguments[0])) {
+                        let title = el.querySelector('[class*="conversationConversationItemtitle"]');
+                        if (title && (title.textContent||'').includes(arguments[0])) {
                             el.focus();
                             ['mousedown','mouseup','click'].forEach(e =>
                                 el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
@@ -359,23 +370,32 @@ class AccountWorker(QThread):
                         }
                     }
                     return false;
-                """, name)
+                """, clean)
 
                 if found:
                     time.sleep(2)
-                    # 读所有TextMessageTextpureText
+                    # 读所有消息，排除我方回复（带MessageItemText的container）
                     msgs = driver.execute_script("""
                         let results = [];
-                        let all = document.querySelectorAll('[class*="TextMessageTextpureText"]');
-                        all.forEach(el => {
-                            let t = el.textContent.trim();
-                            if (t) results.push(t);
+                        let containers = document.querySelectorAll('[class*="MessageItemTextcontainer"]');
+                        containers.forEach(el => {
+                            let cls = el.className || '';
+                            // 跳过我方消息（container有额外MessageItemText类）
+                            if (cls.includes('MessageItemTextcontainer') && cls.split('MessageItemText').length > 2) return;
+                            let text = el.querySelector('[class*="TextMessageTextpureText"]');
+                            if (text) {
+                                let t = text.textContent.trim();
+                                if (t) results.push(t);
+                            }
                         });
                         return results;
                     """)
-                    if msgs and len(msgs) > 1:
-                        follow_up[name] = " | ".join(msgs[1:])
-                        phone_match = re.findall(r'1[3-9]\d{9}', " ".join(msgs[1:]))
+                    if msgs:
+                        # 第一条=打招呼，剩下的=后续回复
+                        follow_up[name] = " | ".join(msgs[1:]) if len(msgs) > 1 else ""
+                        # 提取手机号（从所有对方消息中）
+                        all_text = " ".join(msgs)
+                        phone_match = re.findall(r'1[3-9]\d{9}', all_text)
                         if phone_match:
                             phone_numbers[name] = phone_match[0]
                     else:
