@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-抖音多账号私信自动回复 v4 — chat?isPopup=1 精准版本
-=====================================================
-基于实测验证的 DOM 结构：
-  红点: SPAN[class*="ConversationItemUnRead"]
-  点击: DIV[class*="conversationConversationItem"] focus+mousedown+mouseup+click
-  页面: https://www.douyin.com/chat?isPopup=1
+抖音多账号自动回复 v22 — 仅陌生人 + 退出生成报告
+====================================================
+流程：
+  1. 扫码登录 → 跳转私信页 → 检测「陌生人消息」→ 点击进入
+  2. 停留在陌生人列表 → 检测红点 → 自动回复
+  3. 退出时 → 弹出提示 → 返回主私信页 → 抓取每个陌生人的回复(手机号等)
+  → 导出Excel到桌面
 """
-
 import os, sys, re, json, time, csv, threading
 from datetime import datetime
 from PyQt5.QtWidgets import (
@@ -21,9 +21,9 @@ from PyQt5.QtGui import QFont
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR = os.path.join(BASE_DIR, "chrome_profiles")
 CONFIG_FILE = os.path.join(BASE_DIR, "rules.json")
-LOG_FILE = os.path.join(BASE_DIR, "reply_log.csv")
 CHAT_URL = "https://www.douyin.com/chat?isPopup=1"
 POLL = 5
+DESKTOP = os.path.expanduser("~/Desktop")
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
@@ -34,11 +34,7 @@ def load_rules():
             return json.load(f)
     return {"accounts": [
         {"name": "账号1", "enabled": True,
-         "rules": [{"keyword": "在吗", "reply": "在的，有什么可以帮您？"},
-                    {"keyword": "利率", "reply": "您好！利率请拨打96688咨询~"},
-                    {"keyword": "贷款", "reply": "您好！贷款请到网点或拨打96688咨询~"}],
-         "phone_reply": "好的，已收到您的手机号，稍后联系您~",
-         "default_reply": "您好！感谢关注遵义农商银行，请拨打96688或到网点咨询~",
+         "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式，我们将安排客户经理与您联系~",
          "poll_interval": 5}
     ]}
 
@@ -70,18 +66,21 @@ def get_driver_path():
 class AccountWorker(QThread):
     log_signal = pyqtSignal(str, str)
     status_signal = pyqtSignal(str, str)
+    report_ready = pyqtSignal(str, str)  # account_name, filepath
 
     def __init__(self, acc, idx):
         super().__init__()
         self.acc = acc
         self.idx = idx
         self.name = acc["name"]
-        self.rules = acc.get("rules", [])
-        self.phone_reply = acc.get("phone_reply", "")
-        self.default_reply = acc.get("default_reply", "")
+        self.reply_text = acc.get("reply_text", "")
         self.poll = acc.get("poll_interval", POLL)
         self._stop = False
         self._login_ok = threading.Event()
+        self._driver = None
+        # 今天回复过的所有陌生人: {昵称: {"first_msg": 对方第一条消息, "my_reply": 我方回复}}
+        self.today_strangers = {}
+        self._in_stranger = False
 
     def confirm_login(self):
         self._login_ok.set()
@@ -91,17 +90,6 @@ class AccountWorker(QThread):
 
     def log(self, msg):
         self.log_signal.emit(self.name, msg)
-
-    def match_reply(self, text):
-        if self.phone_reply and re.search(r'1[3-9]\d{9}', text):
-            return self.phone_reply, "手机号"
-        for r in self.rules:
-            kw = r.get("keyword", "")
-            if kw and kw in text:
-                return r["reply"], f"关键词[{kw}]"
-        if self.default_reply:
-            return self.default_reply, "默认"
-        return None, None
 
     def run(self):
         try:
@@ -133,6 +121,7 @@ class AccountWorker(QThread):
         except Exception as e:
             self.log(f"Chrome启动失败: {e}"); return
 
+        self._driver = driver
         driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         driver.set_window_size(500, 800)
 
@@ -145,25 +134,20 @@ class AccountWorker(QThread):
                 time.sleep(0.5)
             if self._stop: return
 
-            # 跳转到纯聊天页
-            self.log("跳转到聊天页...")
+            # 跳转到聊天页
             driver.get(CHAT_URL)
             time.sleep(3)
             self.status_signal.emit(self.name, "监控中")
-            self.log("✅ 开始监控（仅陌生人）")
-
-            # 用最近回复时间追踪（名字作key，稳定不受DOM顺序影响）
+            self.log("✅ 等待陌生人消息...")
             last_reply_time = {}
-            in_stranger = False
 
             while not self._stop:
-                # ─── 陌生人消息检测 ───
-                if not in_stranger:
+                # ─── 尝试进入陌生人消息 ───
+                if not self._in_stranger:
                     clicked = driver.execute_script("""
                         let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
                         for (let el of items) {
-                            let txt = el.textContent || '';
-                            if (txt.includes('陌生人消息') || txt.includes('陌生人')) {
+                            if ((el.textContent||'').includes('陌生人消息')) {
                                 el.focus();
                                 ['mousedown','mouseup','click'].forEach(e =>
                                     el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
@@ -175,35 +159,25 @@ class AccountWorker(QThread):
                     """)
                     if clicked:
                         time.sleep(3)
-                        in_stranger = True
-                        last_reply_time = {}
+                        self._in_stranger = True
                         self.log("🚪 进入陌生人消息")
                     else:
                         time.sleep(self.poll)
                         continue
 
+                # ─── 陌生人列表内扫描红点 ───
                 reds = self._scan_reds(driver)
-
-                # 陌生人列表为空 → 回主列表
-                if not reds and in_stranger:
-                    self._back_to_list(driver)
-                    in_stranger = False
-                    time.sleep(self.poll)
-                    continue
 
                 for red in reds:
                     if self._stop: break
                     name = red.get("name", "用户")
-                    count = int(red.get("unread", "1")) if red.get("unread","1").isdigit() else 1
-
-                    # 30秒内刚回过这个对话，跳过（防止连发）
                     now = time.time()
                     if name in last_reply_time and now - last_reply_time[name] < 30:
                         continue
 
-                    self.log(f"点击红点: {name}({count}条)")
+                    self.log(f"📨 陌生人: {name}")
 
-                    # 点击对话 — 已验证成功的 focus > mousedown > mouseup > click 事件链
+                    # 点击对话
                     ok = driver.execute_script("""
                         let badges = document.querySelectorAll('span[class*="ConversationItemUnRead"]');
                         for (let b of badges) {
@@ -224,12 +198,11 @@ class AccountWorker(QThread):
                         }
                         return false;
                     """)
-                    if not ok:
-                        continue
+                    if not ok: continue
                     time.sleep(2)
 
-                    # 读消息
-                    last_msg = driver.execute_script("""
+                    # 读对方第一条消息
+                    first_msg = driver.execute_script("""
                         let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
                         for (let i=all.length-1; i>=0; i--) {
                             let t = all[i].textContent.trim();
@@ -238,12 +211,14 @@ class AccountWorker(QThread):
                         return '';
                     """)
 
-                    reply_text, rule = self.match_reply(last_msg)
-                    if reply_text and self._send_reply(driver, reply_text):
-                        self.log(f"📤 回复{name}: {reply_text[:30]} [{rule}]")
-                        self._write_log(name, last_msg, reply_text)
+                    # 记录陌生人信息
+                    if name not in self.today_strangers:
+                        self.today_strangers[name] = {"first_msg": first_msg, "my_reply": self.reply_text}
+
+                    # 回复
+                    if self.reply_text and self._send_reply(driver, self.reply_text):
+                        self.log(f"📤 已回复: {self.reply_text[:30]}...")
                         last_reply_time[name] = time.time()
-                        time.sleep(1)
 
                     self._back_to_list(driver)
                     time.sleep(1)
@@ -253,8 +228,10 @@ class AccountWorker(QThread):
         except Exception as e:
             self.log(f"异常: {e}")
         finally:
-            try: driver.quit()
-            except: pass
+            if self._driver:
+                self._generate_report()
+                try: self._driver.quit()
+                except: pass
             self.status_signal.emit(self.name, "已停止")
 
     def _scan_reds(self, driver):
@@ -269,8 +246,8 @@ class AccountWorker(QThread):
                     for(let d=0;d<10&&item;d++){
                         item=item.parentElement;if(!item)break;
                         if(item.className&&item.className.includes('conversationConversationItem')){
-                            let name=(item.textContent||'').split(/[\\s\\n]/)[0].substring(0,12);
-                            reds.push({id:'c_'+idx,index:idx,name:name,unread:t});idx++;break;
+                            let name=(item.textContent||'').split(/[\\s\\n]/)[0].substring(0,15);
+                            reds.push({name:name,unread:t});idx++;break;
                         }
                     }
                 });
@@ -278,13 +255,7 @@ class AccountWorker(QThread):
             return JSON.stringify(reds);
         """)
         result = json.loads(raw) if raw else []
-        cleaned = [r for r in result if isinstance(r, dict) and 'id' in r]
-        if not hasattr(self, '_scan_count'): self._scan_count = 0
-        self._scan_count += 1
-        if self._scan_count % 5 == 1 and cleaned:
-            names = [r.get('name','?')[:8] for r in cleaned[:5]]
-            self.log(f"红点: {', '.join(names)}")
-        return cleaned
+        return [r for r in result if isinstance(r, dict)]
 
     def _back_to_list(self, driver):
         driver.execute_script("""
@@ -315,16 +286,85 @@ class AccountWorker(QThread):
         actions.pause(0.3).send_keys(Keys.ENTER).perform()
         return True
 
-    def _write_log(self, sender, msg_in, msg_out):
-        try:
-            import csv
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            existed = os.path.exists(LOG_FILE)
-            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                if not existed: w.writerow(["时间","账号","联系人","收到消息","回复内容"])
-                w.writerow([ts, self.name, sender, msg_in, msg_out])
-        except: pass
+    def _generate_report(self):
+        """退出时：回到主私信页 → 抓每个陌生人的后续回复 → 生成Excel"""
+        if not self.today_strangers or not self._driver:
+            return
+
+        names = list(self.today_strangers.keys())
+        if not names:
+            return
+
+        driver = self._driver
+        self.log(f"📊 生成报告: {len(names)} 个陌生人")
+
+        # 回到私信首页
+        driver.get(CHAT_URL)
+        time.sleep(3)
+
+        follow_up = {}
+
+        for name in names:
+            try:
+                # 在主私信列表搜索该用户并点击
+                found = driver.execute_script("""
+                    let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
+                    for (let el of items) {
+                        if ((el.textContent||'').includes(arguments[0])) {
+                            el.focus();
+                            ['mousedown','mouseup','click'].forEach(e =>
+                                el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                            );
+                            return true;
+                        }
+                    }
+                    return false;
+                """, name)
+
+                if found:
+                    time.sleep(2)
+                    # 读取对方后来发的所有消息
+                    msgs = driver.execute_script("""
+                        let results = [];
+                        let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
+                        for (let el of all) {
+                            let t = el.textContent.trim();
+                            if (t.length > 0 && t.length < 500 && !t.includes('发送')) {
+                                results.push(t);
+                            }
+                        }
+                        return results;
+                    """)
+                    # 只取超出第一条以外的消息（对方的后续回复）
+                    if msgs and len(msgs) > 1:
+                        follow_up[name] = " | ".join(msgs[1:])
+                    else:
+                        follow_up[name] = ""
+
+                    self._back_to_list(driver)
+                    time.sleep(1)
+            except:
+                follow_up[name] = ""
+
+        # 生成Excel/CSV
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(DESKTOP, f"陌生人回复记录_{self.name}_{ts}.csv")
+
+        with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["序号", "陌生人昵称", "对方消息", "我方回复", "对方后续回复"])
+            for i, name in enumerate(names, 1):
+                info = self.today_strangers[name]
+                w.writerow([
+                    i,
+                    name,
+                    info.get("first_msg", ""),
+                    info.get("my_reply", ""),
+                    follow_up.get(name, "")
+                ])
+
+        self.log(f"📁 报告已保存: {os.path.basename(filepath)}")
+        self.report_ready.emit(self.name, filepath)
 
 
 # ===== GUI =====
@@ -352,8 +392,8 @@ QStatusBar{background:#2d2d2d;color:#aaa}
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("抖音多账号私信自动回复 - 遵义农商银行")
-        self.setGeometry(100,100,1050,720)
+        self.setWindowTitle("抖音多账号自动回复 v22 · 仅陌生人 - 遵义农商银行")
+        self.setGeometry(100, 100, 1050, 620)
         self.setStyleSheet(STYLE)
         self.config = load_rules()
         self.workers = {}
@@ -363,115 +403,125 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪")
 
     def _build_ui(self):
-        c=QWidget();self.setCentralWidget(c);ml=QVBoxLayout(c)
-        top=QHBoxLayout()
-        b=QPushButton("+ 添加账号");b.setObjectName("btnAdd");b.clicked.connect(self._add_account);top.addWidget(b)
-        b=QPushButton("💾 保存");b.clicked.connect(self._save);top.addWidget(b)
+        c = QWidget(); self.setCentralWidget(c); ml = QVBoxLayout(c)
+        top = QHBoxLayout()
+        b = QPushButton("+ 添加账号"); b.setObjectName("btnAdd"); b.clicked.connect(self._add_account); top.addWidget(b)
+        b = QPushButton("💾 保存"); b.clicked.connect(self._save); top.addWidget(b)
         top.addStretch()
-        b=QPushButton("▶ 全部启动");b.setObjectName("btnStart");b.clicked.connect(self._start_all);top.addWidget(b)
-        b=QPushButton("⏹ 全部停止");b.setObjectName("btnStop");b.clicked.connect(self._stop_all);top.addWidget(b)
+        b = QPushButton("▶ 全部启动"); b.setObjectName("btnStart"); b.clicked.connect(self._start_all); top.addWidget(b)
+        b = QPushButton("⏹ 全部停止"); b.setObjectName("btnStop"); b.clicked.connect(self._stop_all); top.addWidget(b)
         ml.addLayout(top)
-        self.tab_w=QTabWidget();ml.addWidget(self.tab_w)
-        g=QGroupBox("运行日志");vl=QVBoxLayout(g)
-        btns=QHBoxLayout()
-        b=QPushButton("导出CSV");b.clicked.connect(self._export_log);btns.addWidget(b)
-        btns.addStretch();vl.addLayout(btns)
-        self.log_t=QTextEdit();self.log_t.setReadOnly(True);self.log_t.setMaximumHeight(140)
-        self.log_t.setFont(QFont("Consolas",9));vl.addWidget(self.log_t)
+        self.tab_w = QTabWidget(); ml.addWidget(self.tab_w)
+        g = QGroupBox("运行日志"); vl = QVBoxLayout(g)
+        self.log_t = QTextEdit(); self.log_t.setReadOnly(True); self.log_t.setMaximumHeight(140)
+        self.log_t.setFont(QFont("Consolas", 9)); vl.addWidget(self.log_t)
         ml.addWidget(g)
 
     def _refresh_tabs(self):
-        self.tab_w.clear();self.tabs.clear()
-        for i,a in enumerate(self.config.get("accounts",[])):self._add_tab(i,a)
+        self.tab_w.clear(); self.tabs.clear()
+        for i, a in enumerate(self.config.get("accounts", [])): self._add_tab(i, a)
 
-    def _add_tab(self,i,a):
-        t=QWidget();l=QVBoxLayout(t)
-        r1=QHBoxLayout()
-        r1.addWidget(QLabel("名称:"));nm=QLineEdit(a.get("name",f"账号{i+1}"));r1.addWidget(nm)
-        en=QCheckBox("启用");en.setChecked(a.get("enabled",True));r1.addWidget(en);r1.addStretch()
-        st=QLabel("⚪ 未启动");r1.addWidget(st);l.addLayout(r1)
-        tb=QTableWidget();tb.setColumnCount(2)
-        tb.setHorizontalHeaderLabels(["关键词","回复内容"])
-        tb.horizontalHeader().setSectionResizeMode(0,QHeaderView.Interactive)
-        tb.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
-        tb.setColumnWidth(0,120)
-        for j,r in enumerate(a.get("rules",[])):
-            if j>=tb.rowCount():tb.insertRow(j)
-            tb.setItem(j,0,QTableWidgetItem(r.get("keyword","")))
-            tb.setItem(j,1,QTableWidgetItem(r.get("reply","")))
-        if tb.rowCount()==0:tb.insertRow(0)
-        l.addWidget(QLabel("关键词规则:"));l.addWidget(tb)
-        rb=QHBoxLayout()
-        b=QPushButton("+ 添加");b.clicked.connect(lambda:tb.insertRow(tb.rowCount()));rb.addWidget(b)
-        b=QPushButton("- 删除");b.clicked.connect(lambda:(tb.currentRow()>=0 and tb.rowCount()>1)and tb.removeRow(tb.currentRow()));rb.addWidget(b)
-        rb.addStretch();l.addLayout(rb)
-        r2=QHBoxLayout();r2.addWidget(QLabel("手机号回复:"));ph=QLineEdit(a.get("phone_reply",""));r2.addWidget(ph);l.addLayout(r2)
-        r3=QHBoxLayout();r3.addWidget(QLabel("默认回复:"));df=QLineEdit(a.get("default_reply",""));r3.addWidget(df);l.addLayout(r3)
-        r4=QHBoxLayout();r4.addWidget(QLabel("间隔(秒):"));pi=QLineEdit(str(a.get("poll_interval",5)));pi.setMaximumWidth(50);r4.addWidget(pi);r4.addStretch()
-        b=QPushButton("▶ 启动");b.setObjectName("btnStart");b.clicked.connect(lambda _,x=i:self._start(x));r4.addWidget(b)
-        b=QPushButton("✓ 确认已登录");b.setStyleSheet("background:#25f4ee;color:#000;font-weight:bold;");b.clicked.connect(lambda _,x=i:self._confirm_login(x));r4.addWidget(b)
-        b=QPushButton("⏹ 停止");b.clicked.connect(lambda _,x=i:self._stop(x));r4.addWidget(b);l.addLayout(r4)
-        r5=QHBoxLayout();r5.addStretch();b=QPushButton("🗑 删除账号");b.clicked.connect(lambda _,x=i:self._del(x));r5.addWidget(b);l.addLayout(r5)
-        self.tab_w.addTab(t,a.get("name",f"账号{i+1}"))
-        self.tabs[i]={"name":nm,"enabled":en,"status":st,"table":tb,"phone":ph,"default":df,"poll":pi}
+    def _add_tab(self, i, a):
+        t = QWidget(); l = QVBoxLayout(t)
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("名称:")); nm = QLineEdit(a.get("name", f"账号{i+1}")); r1.addWidget(nm)
+        en = QCheckBox("启用"); en.setChecked(a.get("enabled", True)); r1.addWidget(en); r1.addStretch()
+        st = QLabel("⚪ 未启动"); r1.addWidget(st); l.addLayout(r1)
+
+        r2 = QHBoxLayout(); r2.addWidget(QLabel("回复内容:"))
+        rp = QLineEdit(a.get("reply_text", "")); r2.addWidget(rp); l.addLayout(r2)
+
+        r4 = QHBoxLayout()
+        r4.addWidget(QLabel("间隔(秒):")); pi = QLineEdit(str(a.get("poll_interval", 5)))
+        pi.setMaximumWidth(50); r4.addWidget(pi); r4.addStretch()
+        b = QPushButton("▶ 启动"); b.setObjectName("btnStart"); b.clicked.connect(lambda _, x=i: self._start(x)); r4.addWidget(b)
+        b = QPushButton("✓ 确认已登录"); b.setStyleSheet("background:#25f4ee;color:#000;font-weight:bold;")
+        b.clicked.connect(lambda _, x=i: self._confirm_login(x)); r4.addWidget(b)
+        b = QPushButton("⏹ 停止"); b.clicked.connect(lambda _, x=i: self._stop(x)); r4.addWidget(b)
+        l.addLayout(r4)
+
+        r5 = QHBoxLayout(); r5.addStretch(); b = QPushButton("🗑 删除账号")
+        b.clicked.connect(lambda _, x=i: self._del(x)); r5.addWidget(b); l.addLayout(r5)
+
+        self.tab_w.addTab(t, a.get("name", f"账号{i+1}"))
+        self.tabs[i] = {"name": nm, "enabled": en, "status": st, "reply": rp, "poll": pi}
 
     def _add_account(self):
-        n=len(self.config["accounts"])+1
-        self.config["accounts"].append({"name":f"账号{n}","enabled":True,"rules":[{"keyword":"在吗","reply":"在的！"}],"phone_reply":"好的收到~","default_reply":"您好！感谢关注遵义农商银行！","poll_interval":5})
-        self._refresh_tabs();self._log("系统",f"已添加账号{n}")
+        n = len(self.config["accounts"]) + 1
+        self.config["accounts"].append({
+            "name": f"账号{n}", "enabled": True,
+            "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式~",
+            "poll_interval": 5
+        })
+        self._refresh_tabs(); self._log("系统", f"已添加账号{n}")
 
-    def _del(self,i):
-        if QMessageBox.question(self,"确认",f"删除{self.config['accounts'][i]['name']}？")==QMessageBox.Yes:
-            self._stop(i);del self.config["accounts"][i];save_rules(self.config);self._refresh_tabs()
+    def _del(self, i):
+        if QMessageBox.question(self, "确认", f"删除{self.config['accounts'][i]['name']}？") == QMessageBox.Yes:
+            self._stop(i); del self.config["accounts"][i]; save_rules(self.config); self._refresh_tabs()
 
-    def _read(self,i):
-        t=self.tabs[i];tb=t["table"];rules=[]
-        for r in range(tb.rowCount()):
-            kw=tb.item(r,0);rp=tb.item(r,1)
-            if kw and kw.text().strip():rules.append({"keyword":kw.text().strip(),"reply":(rp.text()if rp else"")})
-        return{"name":t["name"].text(),"enabled":t["enabled"].isChecked(),"rules":rules,"phone_reply":t["phone"].text(),"default_reply":t["default"].text(),"poll_interval":int(t["poll"].text())if t["poll"].text().isdigit()else 5}
+    def _read(self, i):
+        t = self.tabs[i]
+        return {
+            "name": t["name"].text(), "enabled": t["enabled"].isChecked(),
+            "reply_text": t["reply"].text(),
+            "poll_interval": int(t["poll"].text()) if t["poll"].text().isdigit() else 5
+        }
 
     def _save(self):
-        for i in range(len(self.config["accounts"])):self.config["accounts"][i]=self._read(i)
+        for i in range(len(self.config["accounts"])): self.config["accounts"][i] = self._read(i)
         save_rules(self.config)
 
-    def _start(self,i):
-        self._save();a=self.config["accounts"][i]
-        if not a["enabled"] or a["name"] in self.workers:return
-        w=AccountWorker(a,i);w.log_signal.connect(self._log);w.status_signal.connect(lambda n,s,j=i:self._upd(j,s))
-        w.start();self.workers[a["name"]]=w;self.tabs[i]["status"].setText("🟡 等待登录...")
+    def _start(self, i):
+        self._save(); a = self.config["accounts"][i]
+        if not a["enabled"] or a["name"] in self.workers: return
+        w = AccountWorker(a, i)
+        w.log_signal.connect(self._log)
+        w.status_signal.connect(lambda n, s, j=i: self._upd(j, s))
+        w.report_ready.connect(self._on_report)
+        w.start(); self.workers[a["name"]] = w; self.tabs[i]["status"].setText("🟡 等待登录...")
 
-    def _stop(self,i):
-        nm=self.config["accounts"][i]["name"]
-        if nm in self.workers:self.workers[nm].stop();self.workers[nm].wait(5000);del self.workers[nm]
+    def _stop(self, i):
+        nm = self.config["accounts"][i]["name"]
+        if nm in self.workers: self.workers[nm].stop(); self.workers[nm].wait(5000); del self.workers[nm]
         self.tabs[i]["status"].setText("⚪ 未启动")
 
     def _start_all(self):
         self._save()
-        for i in range(len(self.config["accounts"])):self._start(i)if self.config["accounts"][i]["enabled"]else None
+        for i in range(len(self.config["accounts"])):
+            if self.config["accounts"][i]["enabled"]: self._start(i)
 
     def _stop_all(self):
-        for i in range(len(self.config["accounts"])):self._stop(i)
+        for i in range(len(self.config["accounts"])): self._stop(i)
 
-    def _confirm_login(self,idx):
-        nm=self.config["accounts"][idx]["name"]
-        if nm in self.workers:self.workers[nm].confirm_login();self.tabs[idx]["status"].setText("🟢 监控中");self.tabs[idx]["status"].setStyleSheet("color:#25f4ee;");self._log("系统","确认登录，开始监控")
+    def _confirm_login(self, idx):
+        nm = self.config["accounts"][idx]["name"]
+        if nm in self.workers:
+            self.workers[nm].confirm_login()
+            self.tabs[idx]["status"].setText("🟢 监控中")
+            self.tabs[idx]["status"].setStyleSheet("color:#25f4ee;")
+            self._log("系统", "确认登录，开始监控")
 
-    def _upd(self,i,s):
-        colors={"监控中":"#25f4ee","等待登录":"#ff9a44","已停止":"#aaa"}
-        self.tabs[i]["status"].setText(f"● {s}");self.tabs[i]["status"].setStyleSheet(f"color:{colors.get(s,'#aaa')};")
+    def _upd(self, i, s):
+        colors = {"监控中": "#25f4ee", "等待登录": "#ff9a44", "已停止": "#aaa"}
+        self.tabs[i]["status"].setText(f"● {s}")
+        self.tabs[i]["status"].setStyleSheet(f"color:{colors.get(s, '#aaa')};")
 
-    def _log(self,name,msg):
-        ts=datetime.now().strftime("%H:%M:%S");self.log_t.append(f"[{ts}] [{name}] {msg}")
+    def _log(self, name, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_t.append(f"[{ts}] [{name}] {msg}")
 
-    def _export_log(self):
-        if not os.path.exists(LOG_FILE):QMessageBox.information(self,"提示","暂无日志");return
-        p,_=QFileDialog.getSaveFileName(self,"导出日志","回复记录.csv","CSV(*.csv)")
-        if p:import shutil;shutil.copy(LOG_FILE,p);self._log("系统",f"已导出: {p}")
+    def _on_report(self, name, filepath):
+        self._log(name, f"📁 报告: {os.path.basename(filepath)}")
 
-    def closeEvent(self,e):
-        self._stop_all();self._save();e.accept()
+    def closeEvent(self, e):
+        if self.workers:
+            reply = QMessageBox.question(self, "退出确认",
+                "退出前将自动保存所有陌生人的聊天记录到桌面。\n\n确定退出？",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                e.ignore(); return
+        self._stop_all(); self._save(); e.accept()
 
 
-if __name__=="__main__":
-    app=QApplication(sys.argv);app.setStyle("Fusion");MainWindow().show();sys.exit(app.exec_())
+if __name__ == "__main__":
+    app = QApplication(sys.argv); app.setStyle("Fusion"); MainWindow().show(); sys.exit(app.exec_())
