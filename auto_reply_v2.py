@@ -181,25 +181,23 @@ class AccountWorker(QThread):
                         continue
 
                 # ─── 在陌生人列表内：验证+只回复第一个 ───
-                # 验证是否还在陌生人页面
+                # 验证：第一条对话项x坐标<0说明已进入陌生人子页面
                 still_in = driver.execute_script("""
-                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
-                    if (!box) return false;
-                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
-                    return items.length > 0;
+                    let first = document.querySelector('[class*="conversationConversationItem"]');
+                    if (!first) return false;
+                    let r = first.getBoundingClientRect();
+                    return r.x < -100;
                 """)
                 if not still_in:
                     self._in_stranger = False
                     self.log("不在陌生人列表，重新检测...")
                     continue
 
-                # 只回复第一个陌生人（回复后他会自动消失）
+                # 获取第一个陌生人
                 first_name = driver.execute_script("""
-                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
-                    if (!box) return '';
-                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
-                    if (items.length === 0) return '';
-                    let txt = items[0].textContent || '';
+                    let first = document.querySelector('[class*="conversationConversationItem"]');
+                    if (!first) return '';
+                    let txt = first.textContent || '';
                     let parts = txt.split(/[\\s\\n]+/).filter(p => p.length > 1);
                     return (parts[0] || '').substring(0, 15);
                 """)
@@ -215,15 +213,13 @@ class AccountWorker(QThread):
 
                 self.log(f"回复: {first_name}")
 
-                # 点击第一个
+                # 点击第一个（在陌生人页面里，对话项x坐标为负，但存在且可点击）
                 ok = driver.execute_script("""
-                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
-                    if (!box) return false;
-                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
-                    if (items.length === 0) return false;
-                    items[0].focus();
+                    let first = document.querySelector('[class*="conversationConversationItem"]');
+                    if (!first) return false;
+                    first.focus();
                     ['mousedown','mouseup','click'].forEach(e =>
-                        items[0].dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                        first.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
                     );
                     return true;
                 """)
