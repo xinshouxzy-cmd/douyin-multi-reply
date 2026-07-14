@@ -77,6 +77,7 @@ class AccountWorker(QThread):
         self.poll = acc.get("poll_interval", POLL)
         self._stop = False
         self._login_ok = threading.Event()
+        self._export_now = threading.Event()  # 手动导出触发
         self._driver = None
         # 今天回复过的所有陌生人: {昵称: {"first_msg": 对方第一条消息, "my_reply": 我方回复}}
         self.today_strangers = {}
@@ -84,6 +85,10 @@ class AccountWorker(QThread):
 
     def confirm_login(self):
         self._login_ok.set()
+
+    def trigger_export(self):
+        """手动触发导出记录"""
+        self._export_now.set()
 
     def stop(self):
         self._stop = True
@@ -142,7 +147,14 @@ class AccountWorker(QThread):
             last_reply_time = {}
 
             while not self._stop:
-                # ─── 尝试进入陌生人消息 ───
+                # ─── 手动导出触发 ───
+                if self._export_now.is_set():
+                    self._export_now.clear()
+                    self.log("📊 手动导出记录...")
+                    self._in_stranger = False  # 强制退出陌生人，回首页
+                    self._generate_report()
+                    self.log("✅ 导出完成，继续监控")
+                    continue  # 重新检测陌生人消息
                 if not self._in_stranger:
                     clicked = driver.execute_script("""
                         let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
@@ -287,7 +299,7 @@ class AccountWorker(QThread):
         return True
 
     def _generate_report(self):
-        """退出时：回到主私信页 → 抓每个陌生人的后续回复 → 生成Excel"""
+        """回到主私信页 → 抓每个陌生人的后续回复 → 生成CSV（含手机号提取）"""
         if not self.today_strangers or not self._driver:
             return
 
@@ -303,10 +315,10 @@ class AccountWorker(QThread):
         time.sleep(3)
 
         follow_up = {}
+        phone_numbers = {}
 
         for name in names:
             try:
-                # 在主私信列表搜索该用户并点击
                 found = driver.execute_script("""
                     let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
                     for (let el of items) {
@@ -323,7 +335,6 @@ class AccountWorker(QThread):
 
                 if found:
                     time.sleep(2)
-                    # 读取对方后来发的所有消息
                     msgs = driver.execute_script("""
                         let results = [];
                         let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
@@ -335,9 +346,13 @@ class AccountWorker(QThread):
                         }
                         return results;
                     """)
-                    # 只取超出第一条以外的消息（对方的后续回复）
                     if msgs and len(msgs) > 1:
                         follow_up[name] = " | ".join(msgs[1:])
+                        # 提取手机号码
+                        all_text = " ".join(msgs[1:])
+                        phone_match = re.findall(r'1[3-9]\d{9}', all_text)
+                        if phone_match:
+                            phone_numbers[name] = phone_match[0]
                     else:
                         follow_up[name] = ""
 
@@ -346,21 +361,21 @@ class AccountWorker(QThread):
             except:
                 follow_up[name] = ""
 
-        # 生成Excel/CSV
+        # 生成CSV
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = os.path.join(DESKTOP, f"陌生人回复记录_{self.name}_{ts}.csv")
 
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["序号", "陌生人昵称", "对方消息", "我方回复", "对方后续回复"])
+            w.writerow(["序号", "陌生人昵称", "对方消息", "我方回复", "对方后续回复", "用户手机号码"])
             for i, name in enumerate(names, 1):
                 info = self.today_strangers[name]
                 w.writerow([
-                    i,
-                    name,
+                    i, name,
                     info.get("first_msg", ""),
                     info.get("my_reply", ""),
-                    follow_up.get(name, "")
+                    follow_up.get(name, ""),
+                    phone_numbers.get(name, "")
                 ])
 
         self.log(f"📁 报告已保存: {os.path.basename(filepath)}")
@@ -437,6 +452,8 @@ class MainWindow(QMainWindow):
         b = QPushButton("▶ 启动"); b.setObjectName("btnStart"); b.clicked.connect(lambda _, x=i: self._start(x)); r4.addWidget(b)
         b = QPushButton("✓ 确认已登录"); b.setStyleSheet("background:#25f4ee;color:#000;font-weight:bold;")
         b.clicked.connect(lambda _, x=i: self._confirm_login(x)); r4.addWidget(b)
+        b = QPushButton("📊 导出记录"); b.setStyleSheet("background:#ff9a44;color:#000;font-weight:bold;")
+        b.clicked.connect(lambda _, x=i: self._export_record(x)); r4.addWidget(b)
         b = QPushButton("⏹ 停止"); b.clicked.connect(lambda _, x=i: self._stop(x)); r4.addWidget(b)
         l.addLayout(r4)
 
@@ -500,6 +517,12 @@ class MainWindow(QMainWindow):
             self.tabs[idx]["status"].setText("🟢 监控中")
             self.tabs[idx]["status"].setStyleSheet("color:#25f4ee;")
             self._log("系统", "确认登录，开始监控")
+
+    def _export_record(self, idx):
+        nm = self.config["accounts"][idx]["name"]
+        if nm in self.workers:
+            self.workers[nm].trigger_export()
+            self._log(nm, "📊 已触发导出记录...")
 
     def _upd(self, i, s):
         colors = {"监控中": "#25f4ee", "等待登录": "#ff9a44", "已停止": "#aaa"}
