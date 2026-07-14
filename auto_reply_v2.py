@@ -82,12 +82,13 @@ class AccountWorker(QThread):
         # 今天回复过的所有陌生人: {昵称: {"first_msg": 对方第一条消息, "my_reply": 我方回复}}
         self.today_strangers = {}
         self._in_stranger = False
+        self._export_path = None  # GUI设置的导出路径
 
     def confirm_login(self):
         self._login_ok.set()
 
-    def trigger_export(self):
-        """手动触发导出记录"""
+    def trigger_export(self, path=None):
+        self._export_path = path
         self._export_now.set()
 
     def stop(self):
@@ -147,13 +148,14 @@ class AccountWorker(QThread):
             last_reply_time = {}
 
             while not self._stop:
-                # ─── 手动导出触发 ───
+                # 手动导出触发
                 if self._export_now.is_set():
                     self._export_now.clear()
-                    self.log("📊 手动导出记录...")
-                    self._in_stranger = False  # 强制退出陌生人，回首页
-                    self._generate_report()
-                    self.log("✅ 导出完成，继续监控")
+                    self._in_stranger = False
+                    fp = self._generate_report(filepath=self._export_path)
+                    self._export_path = None
+                    if fp:
+                        self.log(f"导出: {os.path.basename(fp)}")
                     continue
                 if not self._in_stranger:
                     entered = self._enter_stranger(driver)
@@ -385,14 +387,13 @@ class AccountWorker(QThread):
         actions.pause(0.3).send_keys(Keys.ENTER).perform()
         return True
 
-    def _generate_report(self):
-        """回到主私信页 → 抓每个陌生人的后续回复 → 生成CSV（含手机号提取）"""
+    def _generate_report(self, filepath=None):
+        """抓每个陌生人的后续回复 → 生成CSV。返回文件路径"""
         if not self.today_strangers or not self._driver:
-            return
-
+            return None
         names = list(self.today_strangers.keys())
         if not names:
-            return
+            return None
 
         driver = self._driver
         self.log(f"📊 生成报告: {len(names)} 个陌生人")
@@ -449,8 +450,9 @@ class AccountWorker(QThread):
                 follow_up[name] = ""
 
         # 生成CSV
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join(DESKTOP, f"陌生人回复记录_{self.name}_{ts}.csv")
+        if not filepath:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(DESKTOP, f"陌生人回复记录_{self.name}_{ts}.csv")
 
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -467,6 +469,7 @@ class AccountWorker(QThread):
 
         self.log(f"📁 报告已保存: {os.path.basename(filepath)}")
         self.report_ready.emit(self.name, filepath)
+        return filepath
 
 
 # ===== GUI =====
@@ -607,9 +610,14 @@ class MainWindow(QMainWindow):
 
     def _export_record(self, idx):
         nm = self.config["accounts"][idx]["name"]
-        if nm in self.workers:
-            self.workers[nm].trigger_export()
-            self._log(nm, "📊 已触发导出记录...")
+        if nm not in self.workers:
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"陌生人回复记录_{nm}_{ts}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "保存导出记录", default_name, "CSV文件(*.csv)")
+        if path:
+            self.workers[nm].trigger_export(path)
+            self._log(nm, "已触发导出...")
 
     def _upd(self, i, s):
         colors = {"监控中": "#25f4ee", "等待登录": "#ff9a44", "已停止": "#aaa"}
