@@ -160,6 +160,7 @@ class AccountWorker(QThread):
                     self._in_stranger = False
                     fp = self._generate_report(filepath=self._export_path)
                     self._export_path = None
+                    last_refresh = time.time()  # 重置刷新计时，避免导出后立即刷新
                     if fp:
                         self.log(f"导出: {os.path.basename(fp)}")
                     continue
@@ -181,59 +182,44 @@ class AccountWorker(QThread):
                         continue
 
                 # ─── 在陌生人列表内：验证+只回复第一个 ───
-                # 验证：右侧出现陌生人标题 panel（x>0）
+                # 验证：右侧出现陌生人列表容器
                 still_in = driver.execute_script("""
-                    let title = document.querySelector('[class*="conversationStrangerConversationListtitl"]');
-                    if (!title) return false;
-                    let r = title.getBoundingClientRect();
-                    return r.x > 0 && r.width > 50;
+                    let list = document.querySelector('[class*="conversationStrangerConversationListlist"]');
+                    if (!list) return false;
+                    let items = list.querySelectorAll('[class*="conversationConversationItemwrapper"]');
+                    return items.length > 0;
                 """)
                 if not still_in:
                     self._in_stranger = False
                     self.log("不在陌生人列表，重新检测...")
                     continue
 
-                # 找第一个陌生人（x>0的对话项）
-                first_name = driver.execute_script("""
-                    let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
-                    for (let el of items) {
-                        let r = el.getBoundingClientRect();
-                        if (r.x > 0 && r.width > 100) {
-                            let txt = el.textContent || '';
-                            let name = txt.split(/[\\s\\n0-9]+/).filter(p => p.length > 1)[0] || '';
-                            return name.substring(0, 15);
-                        }
-                    }
-                    return '';
+                # 找第一个陌生人（陌生人列表容器内）并点击
+                clicked = driver.execute_script("""
+                    let list = document.querySelector('[class*="conversationStrangerConversationListlist"]');
+                    if (!list) return '';
+                    let items = list.querySelectorAll('[class*="conversationConversationItemwrapper"]');
+                    if (items.length === 0) return '';
+                    let first = items[0];
+                    let txt = first.textContent || '';
+                    first.focus();
+                    ['mousedown','mouseup','click'].forEach(e =>
+                        first.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                    );
+                    return txt.split(/[\\s\\n]+/).filter(p => p.length > 1)[0] || '';
                 """)
 
-                if not first_name:
+                if not clicked:
                     time.sleep(self.poll)
                     continue
 
+                first_name = clicked[:15]
                 now = time.time()
                 if first_name in last_reply_time and now - last_reply_time[first_name] < 30:
                     time.sleep(self.poll)
                     continue
 
                 self.log(f"回复: {first_name}")
-
-                # 点击第一个陌生人（x>0的那个）
-                ok = driver.execute_script("""
-                    let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
-                    for (let el of items) {
-                        let r = el.getBoundingClientRect();
-                        if (r.x > 0 && r.width > 100) {
-                            el.focus();
-                            ['mousedown','mouseup','click'].forEach(e =>
-                                el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                            );
-                            return true;
-                        }
-                    }
-                    return false;
-                """)
-                if not ok: continue
                 time.sleep(2)
 
                 # 读对方第一条消息 (TextMessageTextpureText)
