@@ -236,14 +236,10 @@ class AccountWorker(QThread):
                 if not ok: continue
                 time.sleep(2)
 
-                # 读对方第一条消息
+                # 读对方第一条消息 (TextMessageTextpureText)
                 first_msg = driver.execute_script("""
-                    let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
-                    for (let i=all.length-1; i>=0; i--) {
-                        let t = all[i].textContent.trim();
-                        if (t.length>0 && t.length<500 && !t.includes('发送')) return t;
-                    }
-                    return '';
+                    let msg = document.querySelector('[class*="TextMessageTextpureText"]');
+                    return msg ? msg.textContent.trim() : '';
                 """)
 
                 if first_name not in self.today_strangers:
@@ -262,7 +258,6 @@ class AccountWorker(QThread):
             self.log(f"异常: {e}")
         finally:
             if self._driver:
-                self._generate_report()
                 try: self._driver.quit()
                 except: pass
             self.status_signal.emit(self.name, "已停止")
@@ -325,7 +320,8 @@ class AccountWorker(QThread):
 
     def _send_reply(self, driver, text):
         found = driver.execute_script("""
-            let inp=null;
+            let inp = document.querySelector('[class*="zone-container"][class*="editor-kit-container"]');
+            if (inp) { inp.focus(); inp.click(); return true; }
             let all=document.querySelectorAll('div[contenteditable="true"], textarea');
             for(let el of all){
                 let r=el.getBoundingClientRect();
@@ -345,7 +341,7 @@ class AccountWorker(QThread):
         return True
 
     def _generate_report(self, filepath=None):
-        """抓每个陌生人的后续回复 → 生成CSV。返回文件路径"""
+        """回主私信页→找每个人→读后续消息→生成CSV"""
         if not self.today_strangers or not self._driver:
             return None
         names = list(self.today_strangers.keys())
@@ -353,9 +349,8 @@ class AccountWorker(QThread):
             return None
 
         driver = self._driver
-        self.log(f"📊 生成报告: {len(names)} 个陌生人")
+        self.log(f"生成报告: {len(names)} 个陌生人")
 
-        # 回到私信首页
         driver.get(CHAT_URL)
         time.sleep(3)
 
@@ -364,10 +359,12 @@ class AccountWorker(QThread):
 
         for name in names:
             try:
+                # 在主列表找匹配的对话项
                 found = driver.execute_script("""
-                    let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
+                    let items = document.querySelectorAll('[class*="conversationConversationItemwrapper"]');
                     for (let el of items) {
-                        if ((el.textContent||'').includes(arguments[0])) {
+                        let txt = el.textContent || '';
+                        if (txt.includes(arguments[0])) {
                             el.focus();
                             ['mousedown','mouseup','click'].forEach(e =>
                                 el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
@@ -380,22 +377,19 @@ class AccountWorker(QThread):
 
                 if found:
                     time.sleep(2)
+                    # 读所有TextMessageTextpureText
                     msgs = driver.execute_script("""
                         let results = [];
-                        let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
-                        for (let el of all) {
+                        let all = document.querySelectorAll('[class*="TextMessageTextpureText"]');
+                        all.forEach(el => {
                             let t = el.textContent.trim();
-                            if (t.length > 0 && t.length < 500 && !t.includes('发送')) {
-                                results.push(t);
-                            }
-                        }
+                            if (t) results.push(t);
+                        });
                         return results;
                     """)
                     if msgs and len(msgs) > 1:
                         follow_up[name] = " | ".join(msgs[1:])
-                        # 提取手机号码
-                        all_text = " ".join(msgs[1:])
-                        phone_match = re.findall(r'1[3-9]\d{9}', all_text)
+                        phone_match = re.findall(r'1[3-9]\d{9}', " ".join(msgs[1:]))
                         if phone_match:
                             phone_numbers[name] = phone_match[0]
                     else:
@@ -406,25 +400,20 @@ class AccountWorker(QThread):
             except:
                 follow_up[name] = ""
 
-        # 生成CSV
+        # CSV
         if not filepath:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = os.path.join(DESKTOP, f"陌生人回复记录_{self.name}_{ts}.csv")
 
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["序号", "陌生人昵称", "对方消息", "我方回复", "对方后续回复", "用户手机号码"])
+            w.writerow(["序号","陌生人昵称","对方消息","我方回复","对方后续回复","用户手机号码"])
             for i, name in enumerate(names, 1):
                 info = self.today_strangers[name]
-                w.writerow([
-                    i, name,
-                    info.get("first_msg", ""),
-                    info.get("my_reply", ""),
-                    follow_up.get(name, ""),
-                    phone_numbers.get(name, "")
-                ])
+                w.writerow([i, name, info.get("first_msg",""), info.get("my_reply",""),
+                           follow_up.get(name,""), phone_numbers.get(name,"")])
 
-        self.log(f"📁 报告已保存: {os.path.basename(filepath)}")
+        self.log(f"报告已保存: {os.path.basename(filepath)}")
         self.report_ready.emit(self.name, filepath)
         return filepath
 
@@ -591,7 +580,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.workers:
             reply = QMessageBox.question(self, "退出确认",
-                "退出前将自动保存所有陌生人的聊天记录到桌面。\n\n确定退出？",
+                "关闭前请先点击「导出记录」保存陌生人的聊天记录。\n\n确定退出？",
                 QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.No:
                 e.ignore(); return
