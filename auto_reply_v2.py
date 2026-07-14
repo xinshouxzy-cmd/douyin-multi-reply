@@ -258,53 +258,79 @@ class AccountWorker(QThread):
 
     def _enter_stranger(self, driver):
         """点击「陌生人消息」并验证已进入。返回 True=成功进入"""
-        # 1. 在主私信列表找到「陌生人消息」并点击
-        clicked = driver.execute_script("""
-            let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
-            for (let el of items) {
-                if ((el.textContent||'').includes('陌生人消息')) {
-                    el.scrollIntoView({block:'center'});
-                    el.focus();
-                    ['mousedown','mouseup','click'].forEach(e =>
-                        el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                    );
-                    return true;
+        from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.keys import Keys
+
+        # 1. 找「陌生人消息」元素（遍历所有可见文本节点）
+        found_el = driver.execute_script("""
+            // 遍历DOM找包含「陌生人消息」文本的最内层元素
+            let all = document.querySelectorAll('*');
+            let best = null;
+            for (let el of all) {
+                if (el.children.length > 0) continue;  // 只看叶子节点
+                let t = el.textContent?.trim();
+                if (t === '陌生人消息' || t === '陌生人') {
+                    let rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 10) {
+                        // 找最近的可点击祖先
+                        let p = el;
+                        for (let d=0; d<8; d++) {
+                            p = p.parentElement;
+                            if (!p) break;
+                            let cls = p.className?.toString() || '';
+                            if (cls.includes('item') || cls.includes('Item') || cls.includes('conversation') || cls.includes('Conversation')) {
+                                best = p;
+                                break;
+                            }
+                        }
+                        if (best) break;
+                    }
                 }
+            }
+            if (best) {
+                best.setAttribute('data-stranger-entry', 'true');
+                return true;
             }
             return false;
         """)
-        if not clicked:
+
+        if not found_el:
+            return False
+
+        # 2. 尝试用 Selenium ActionChains 点击（比JS事件更可靠）
+        try:
+            el = driver.find_element('css selector', '[data-stranger-entry="true"]')
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.3)
+            ActionChains(driver).move_to_element(el).click().perform()
+        except:
             return False
 
         time.sleep(3)
 
-        # 2. 验证：进入后页面顶部应有「陌生人消息」标题，且对话列表里是个体用户(非群组)
+        # 3. 验证：检查是否出现「返回」按钮（只有在进入后才有）
         inside = driver.execute_script("""
-            // 方法1: 检查页面是否显示了独立的陌生人列表（对话项是个人名）
-            let items = document.querySelectorAll('[class*="conversationConversationItem"]');
-            let hasIndividuals = false;
-            for (let el of items) {
-                let txt = (el.textContent||'').trim();
-                // 排除「陌生人消息」这个群组入口本身
-                if (txt && txt.length > 0 && !txt.includes('陌生人消息') && !txt.includes('陌生人')) {
-                    hasIndividuals = true;
-                    break;
+            // 检查返回箭头/按钮
+            let backEls = document.querySelectorAll('[class*="back"], [class*="Back"], [class*="return"], [class*="arrow-left"], [class*="ArrowLeft"]');
+            for (let el of backEls) {
+                let rect = el.getBoundingClientRect();
+                if (rect.width > 5 && rect.height > 5 && rect.width < 200) {
+                    return true;
                 }
             }
-            // 方法2: 检查面包屑/标题
-            let headers = document.querySelectorAll('[class*="title"], [class*="header"], [class*="breadcrumb"]');
-            let hasTitle = false;
+            // 回退：检查顶部标题
+            let headers = document.querySelectorAll('div, span, h1, h2, h3');
             for (let h of headers) {
-                if ((h.textContent||'').includes('陌生人消息')) {
-                    hasTitle = true;
-                    break;
+                if ((h.textContent||'').includes('陌生人消息') && h.children.length === 0) {
+                    let rect = h.getBoundingClientRect();
+                    if (rect.y < 150) return true;
                 }
             }
-            return hasIndividuals || hasTitle;
+            return false;
         """)
 
         if not inside:
-            self.log("⚠️ 点击了但未进入陌生人消息，重试...")
+            self.log("⚠️ 点击了但未验证进入，重试...")
             return False
 
         return True
