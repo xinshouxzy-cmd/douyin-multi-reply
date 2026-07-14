@@ -180,8 +180,8 @@ class AccountWorker(QThread):
                         time.sleep(self.poll)
                         continue
 
-                # ─── 在陌生人列表内：验证+回复 ───
-                # 每轮先验证是否还在陌生人页面
+                # ─── 在陌生人列表内：验证+只回复第一个 ───
+                # 验证是否还在陌生人页面
                 still_in = driver.execute_script("""
                     let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
                     if (!box) return false;
@@ -193,67 +193,62 @@ class AccountWorker(QThread):
                     self.log("不在陌生人列表，重新检测...")
                     continue
 
-                # 只获取陌生人容器内的对话
-                all_items = driver.execute_script("""
+                # 只回复第一个陌生人（回复后他会自动消失）
+                first_name = driver.execute_script("""
                     let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
-                    if (!box) return [];
+                    if (!box) return '';
                     let items = box.querySelectorAll('[class*="conversationConversationItem"]');
-                    let results = [];
-                    items.forEach((el, i) => {
-                        let txt = el.textContent || '';
-                        let parts = txt.split(/[\\s\\n]+/).filter(p => p.length > 1);
-                        let name = (parts[0] || '').substring(0, 15);
-                        if (name && !name.includes('陌生人')) {
-                            results.push({index: i, name: name});
-                        }
-                    });
-                    return results;
+                    if (items.length === 0) return '';
+                    let txt = items[0].textContent || '';
+                    let parts = txt.split(/[\\s\\n]+/).filter(p => p.length > 1);
+                    return (parts[0] || '').substring(0, 15);
                 """)
 
-                for item in all_items[:5]:  # 每次最多处理5条
-                    if self._stop: break
-                    name = item.get("name", "用户")
-                    now = time.time()
-                    if name in last_reply_time and now - last_reply_time[name] < 30:
-                        continue
+                if not first_name:
+                    time.sleep(self.poll)
+                    continue
 
-                    self.log(f"回复: {name}")
+                now = time.time()
+                if first_name in last_reply_time and now - last_reply_time[first_name] < 30:
+                    time.sleep(self.poll)
+                    continue
 
-                    # 点击陌生人容器内的对话（不是全局）
-                    ok = driver.execute_script("""
-                        let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
-                        if (!box) return false;
-                        let items = box.querySelectorAll('[class*="conversationConversationItem"]');
-                        let target = items[arguments[0]];
-                        if (!target) return false;
-                        target.focus();
-                        ['mousedown','mouseup','click'].forEach(e =>
-                            target.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                        );
-                        return true;
-                    """, item["index"])
-                    if not ok: continue
-                    time.sleep(2)
+                self.log(f"回复: {first_name}")
 
-                    # 读对方第一条消息
-                    first_msg = driver.execute_script("""
-                        let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
-                        for (let i=all.length-1; i>=0; i--) {
-                            let t = all[i].textContent.trim();
-                            if (t.length>0 && t.length<500 && !t.includes('发送')) return t;
-                        }
-                        return '';
-                    """)
+                # 点击第一个
+                ok = driver.execute_script("""
+                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+                    if (!box) return false;
+                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
+                    if (items.length === 0) return false;
+                    items[0].focus();
+                    ['mousedown','mouseup','click'].forEach(e =>
+                        items[0].dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                    );
+                    return true;
+                """)
+                if not ok: continue
+                time.sleep(2)
 
-                    if name not in self.today_strangers:
-                        self.today_strangers[name] = {"first_msg": first_msg, "my_reply": self.reply_text}
+                # 读对方第一条消息
+                first_msg = driver.execute_script("""
+                    let all = document.querySelectorAll('div[class*="message-content"], div[class*="bubble"], div[class*="msg-text"], span[class*="content"]');
+                    for (let i=all.length-1; i>=0; i--) {
+                        let t = all[i].textContent.trim();
+                        if (t.length>0 && t.length<500 && !t.includes('发送')) return t;
+                    }
+                    return '';
+                """)
 
-                    if self.reply_text and self._send_reply(driver, self.reply_text):
-                        self.log(f"已回复: {name}")
-                        last_reply_time[name] = time.time()
+                if first_name not in self.today_strangers:
+                    self.today_strangers[first_name] = {"first_msg": first_msg, "my_reply": self.reply_text}
 
-                    self._back_to_list(driver)
-                    time.sleep(1)
+                if self.reply_text and self._send_reply(driver, self.reply_text):
+                    self.log(f"已回复: {first_name}")
+                    last_reply_time[first_name] = time.time()
+
+                self._back_to_list(driver)
+                time.sleep(1)
 
                 time.sleep(self.poll)
 
