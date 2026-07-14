@@ -263,106 +263,60 @@ class AccountWorker(QThread):
         return [r for r in result if isinstance(r, dict)]
 
     def _enter_stranger(self, driver):
-        """点击「陌生人消息」并验证已进入。返回 True=成功进入"""
+        """点击「陌生人消息」入口行，验证已进入。返回 True=成功"""
         from selenium.webdriver.common.action_chains import ActionChains
-        from selenium.webdriver.common.keys import Keys
 
-        # 1. 找「陌生人消息」元素（遍历所有可见文本节点）
-        found_el = driver.execute_script("""
-            // 遍历DOM找包含「陌生人消息」文本的最内层元素
-            let all = document.querySelectorAll('*');
-            let best = null;
-            for (let el of all) {
-                if (el.children.length > 0) continue;  // 只看叶子节点
-                let t = el.textContent?.trim();
-                if (t === '陌生人消息' || t === '陌生人') {
-                    let rect = el.getBoundingClientRect();
-                    if (rect.width > 20 && rect.height > 10) {
-                        // 找最近的可点击祖先
-                        let p = el;
-                        for (let d=0; d<8; d++) {
-                            p = p.parentElement;
-                            if (!p) break;
-                            let cls = p.className?.toString() || '';
-                            if (cls.includes('item') || cls.includes('Item') || cls.includes('conversation') || cls.includes('Conversation')) {
-                                best = p;
-                                break;
-                            }
-                        }
-                        if (best) break;
+        # 1. 找 conversationStrangerBoxrowArea2 可点击行
+        clicked = driver.execute_script("""
+            let row = document.querySelector('[class*="conversationStrangerBoxrowArea2"]');
+            if (!row) row = document.querySelector('[class*="StrangerBoxwrapper"]');
+            if (!row) {
+                // 降级：遍历找包含conversationStrangerBoxtitle的祖先
+                let title = document.querySelector('[class*="conversationStrangerBoxtitle"]');
+                if (title) {
+                    let p = title;
+                    for (let d=0; d<5; d++) {
+                        p = p.parentElement; if (!p) break;
+                        let r = p.getBoundingClientRect();
+                        if (r.width > 200) { row = p; break; }
                     }
                 }
             }
-            if (best) {
-                best.setAttribute('data-stranger-entry', 'true');
+            if (row) {
+                row.setAttribute('data-stranger-click', '1');
                 return true;
             }
             return false;
         """)
-
-        if not found_el:
+        if not clicked:
             return False
 
-        # 2. 尝试用 Selenium ActionChains 点击（比JS事件更可靠）
+        # 2. Selenium 原生点击
         try:
-            el = driver.find_element('css selector', '[data-stranger-entry="true"]')
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-            time.sleep(0.3)
+            el = driver.find_element('css selector', '[data-stranger-click="1"]')
             ActionChains(driver).move_to_element(el).click().perform()
         except:
             return False
 
         time.sleep(3)
 
-        # 3. 验证：检查是否出现「返回」按钮（只有在进入后才有）
+        # 3. 验证：对话列表是否变成了个体用户（而非原来的陌生人入口）
         inside = driver.execute_script("""
-            // 检查返回箭头/按钮
-            let backEls = document.querySelectorAll('[class*="back"], [class*="Back"], [class*="return"], [class*="arrow-left"], [class*="ArrowLeft"]');
-            for (let el of backEls) {
-                let rect = el.getBoundingClientRect();
-                if (rect.width > 5 && rect.height > 5 && rect.width < 200) {
+            let items = document.querySelectorAll('[class*="conversationConversationItem"]');
+            for (let el of items) {
+                let txt = el.textContent || '';
+                // 用户对话包含时间戳格式（如"刚刚""分钟前""月日"）
+                if (/刚刚|分钟前|小时前|昨天|\\d+月\\d+日/.test(txt)) {
                     return true;
-                }
-            }
-            // 回退：检查顶部标题
-            let headers = document.querySelectorAll('div, span, h1, h2, h3');
-            for (let h of headers) {
-                if ((h.textContent||'').includes('陌生人消息') && h.children.length === 0) {
-                    let rect = h.getBoundingClientRect();
-                    if (rect.y < 150) return true;
                 }
             }
             return false;
         """)
-
-        if not inside:
-            self.log("⚠️ 点击了但未验证进入，重试...")
-            return False
+        return inside
 
         return True
-        raw = driver.execute_script("""
-            let reds=[];let idx=0;
-            try{
-                let badges=document.querySelectorAll('span[class*="ConversationItemUnRead"]');
-                badges.forEach(b=>{
-                    let t=b.textContent.trim();
-                    if(!t||!/^\\d+$/.test(t))return;
-                    let item=b;
-                    for(let d=0;d<10&&item;d++){
-                        item=item.parentElement;if(!item)break;
-                        if(item.className&&item.className.includes('conversationConversationItem')){
-                            let name=(item.textContent||'').split(/[\\s\\n]/)[0].substring(0,15);
-                            reds.push({name:name,unread:t});idx++;break;
-                        }
-                    }
-                });
-            }catch(e){}
-            return JSON.stringify(reds);
-        """)
-        result = json.loads(raw) if raw else []
-        return [r for r in result if isinstance(r, dict)]
 
-    def _back_to_list(self, driver):
+    def _scan_reds(self, driver):
         driver.execute_script("""
             let back=document.querySelector('[class*="back"], [class*="return"], [class*="arrow"]');
             if(back){back.closest('div,button,span').click();return;}
