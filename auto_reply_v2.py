@@ -180,18 +180,30 @@ class AccountWorker(QThread):
                         time.sleep(self.poll)
                         continue
 
-                # ─── 在陌生人列表内：回复所有对话 ───
-                # 获取陌生人列表里的所有对话项
+                # ─── 在陌生人列表内：验证+回复 ───
+                # 每轮先验证是否还在陌生人页面
+                still_in = driver.execute_script("""
+                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+                    if (!box) return false;
+                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
+                    return items.length > 0;
+                """)
+                if not still_in:
+                    self._in_stranger = False
+                    self.log("不在陌生人列表，重新检测...")
+                    continue
+
+                # 只获取陌生人容器内的对话
                 all_items = driver.execute_script("""
+                    let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+                    if (!box) return [];
+                    let items = box.querySelectorAll('[class*="conversationConversationItem"]');
                     let results = [];
-                    let items = document.querySelectorAll('[class*="conversationConversationItem"]');
                     items.forEach((el, i) => {
                         let txt = el.textContent || '';
-                        let name = txt.split(/[0-9]/)[0].trim().substring(0, 15);
-                        // 排除「陌生人消息」面包屑
-                        if (name.includes('陌生人')) return;
-                        // 只取有实际内容的名字
-                        if (name && name.length > 1) {
+                        let parts = txt.split(/[\\s\\n]+/).filter(p => p.length > 1);
+                        let name = (parts[0] || '').substring(0, 15);
+                        if (name && !name.includes('陌生人')) {
                             results.push({index: i, name: name});
                         }
                     });
@@ -207,9 +219,11 @@ class AccountWorker(QThread):
 
                     self.log(f"回复: {name}")
 
-                    # 点击对话
+                    # 点击陌生人容器内的对话（不是全局）
                     ok = driver.execute_script("""
-                        let items = document.querySelectorAll('[class*="conversationConversationItem"]');
+                        let box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+                        if (!box) return false;
+                        let items = box.querySelectorAll('[class*="conversationConversationItem"]');
                         let target = items[arguments[0]];
                         if (!target) return false;
                         target.focus();
