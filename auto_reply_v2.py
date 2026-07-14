@@ -143,6 +143,10 @@ class AccountWorker(QThread):
             # 跳转到聊天页
             driver.get(CHAT_URL)
             time.sleep(3)
+            self.log("等待10秒后刷新页面...")
+            time.sleep(10)
+            driver.refresh()
+            time.sleep(3)
             self.status_signal.emit(self.name, "监控中")
             self.log("✅ 等待陌生人消息...")
             last_reply_time = {}
