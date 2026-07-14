@@ -150,13 +150,46 @@ class AccountWorker(QThread):
             driver.get(CHAT_URL)
             time.sleep(3)
             self.status_signal.emit(self.name, "监控中")
-            self.log("✅ 开始监控")
+            self.log("✅ 开始监控（仅陌生人）")
 
             # 用最近回复时间追踪（名字作key，稳定不受DOM顺序影响）
             last_reply_time = {}
+            in_stranger = False
 
             while not self._stop:
+                # ─── 陌生人消息检测 ───
+                if not in_stranger:
+                    clicked = driver.execute_script("""
+                        let items = document.querySelectorAll('[class*="conversation"], [class*="session"], [class*="ConversationItem"]');
+                        for (let el of items) {
+                            let txt = el.textContent || '';
+                            if (txt.includes('陌生人消息') || txt.includes('陌生人')) {
+                                el.focus();
+                                ['mousedown','mouseup','click'].forEach(e =>
+                                    el.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                                );
+                                return true;
+                            }
+                        }
+                        return false;
+                    """)
+                    if clicked:
+                        time.sleep(3)
+                        in_stranger = True
+                        last_reply_time = {}
+                        self.log("🚪 进入陌生人消息")
+                    else:
+                        time.sleep(self.poll)
+                        continue
+
                 reds = self._scan_reds(driver)
+
+                # 陌生人列表为空 → 回主列表
+                if not reds and in_stranger:
+                    self._back_to_list(driver)
+                    in_stranger = False
+                    time.sleep(self.poll)
+                    continue
 
                 for red in reds:
                     if self._stop: break
