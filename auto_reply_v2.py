@@ -148,9 +148,10 @@ class AccountWorker(QThread):
             driver.refresh()
             time.sleep(3)
             self.status_signal.emit(self.name, "监控中")
-            self.log("✅ 等待陌生人消息...")
+            self.log("等待陌生人消息...")
             last_reply_time = {}
             last_refresh = time.time()
+            REFRESH_INTERVAL = 30  # 首页每30秒刷新
 
             while not self._stop:
                 # 手动导出触发
@@ -162,53 +163,61 @@ class AccountWorker(QThread):
                     if fp:
                         self.log(f"导出: {os.path.basename(fp)}")
                     continue
+
+                # ─── 不在陌生人列表内：检测+定期刷新 ───
                 if not self._in_stranger:
-                    # 每60秒刷新一次私信首页，确保陌生人消息出现
-                    if time.time() - last_refresh > 60:
+                    if time.time() - last_refresh > REFRESH_INTERVAL:
+                        self.log("刷新页面...")
                         driver.refresh()
                         time.sleep(3)
                         last_refresh = time.time()
-                    entered = self._enter_stranger(driver)
-                    if entered:
+                    
+                    if self._enter_stranger(driver):
                         self._in_stranger = True
-                        self.log("🚪 已进入陌生人消息")
+                        self.log("已进入陌生人消息，停止刷新")
+                        last_reply_time = {}
                     else:
                         time.sleep(self.poll)
                         continue
 
-                # ─── 陌生人列表内扫描红点 ───
-                reds = self._scan_reds(driver)
+                # ─── 在陌生人列表内：回复所有对话 ───
+                # 获取陌生人列表里的所有对话项
+                all_items = driver.execute_script("""
+                    let results = [];
+                    let items = document.querySelectorAll('[class*="conversationConversationItem"]');
+                    items.forEach((el, i) => {
+                        let txt = el.textContent || '';
+                        let name = txt.split(/[0-9]/)[0].trim().substring(0, 15);
+                        // 排除「陌生人消息」面包屑
+                        if (name.includes('陌生人')) return;
+                        // 只取有实际内容的名字
+                        if (name && name.length > 1) {
+                            results.push({index: i, name: name});
+                        }
+                    });
+                    return results;
+                """)
 
-                for red in reds:
+                for item in all_items[:5]:  # 每次最多处理5条
                     if self._stop: break
-                    name = red.get("name", "用户")
+                    name = item.get("name", "用户")
                     now = time.time()
                     if name in last_reply_time and now - last_reply_time[name] < 30:
                         continue
 
-                    self.log(f"📨 陌生人: {name}")
+                    self.log(f"回复: {name}")
 
                     # 点击对话
                     ok = driver.execute_script("""
-                        let badges = document.querySelectorAll('span[class*="ConversationItemUnRead"]');
-                        for (let b of badges) {
-                            let t = b.textContent.trim();
-                            if (!t || !/^\\d+$/.test(t)) continue;
-                            let item = b;
-                            for (let d=0; d<10 && item; d++) {
-                                item = item.parentElement;
-                                if (!item) break;
-                                if (item.className && item.className.includes('conversationConversationItem')) {
-                                    item.focus();
-                                    ['mousedown','mouseup','click'].forEach(e =>
-                                        item.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
-                                    );
-                                    return true;
-                                }
-                            }
-                        }
-                        return false;
-                    """)
+                        let items = document.querySelectorAll('[class*="conversationConversationItem"]');
+                        let target = items[arguments[0]];
+                        if (!target) return false;
+                        target.focus();
+                        ['mousedown','mouseup','click'].forEach(e =>
+                            target.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true}))
+                        );
+                        return true;
+                    """, item["index"])
                     if not ok: continue
                     time.sleep(2)
 
@@ -222,13 +231,11 @@ class AccountWorker(QThread):
                         return '';
                     """)
 
-                    # 记录陌生人信息
                     if name not in self.today_strangers:
                         self.today_strangers[name] = {"first_msg": first_msg, "my_reply": self.reply_text}
 
-                    # 回复
                     if self.reply_text and self._send_reply(driver, self.reply_text):
-                        self.log(f"📤 已回复: {self.reply_text[:30]}...")
+                        self.log(f"已回复: {name}")
                         last_reply_time[name] = time.time()
 
                     self._back_to_list(driver)
@@ -269,56 +276,29 @@ class AccountWorker(QThread):
         return [r for r in result if isinstance(r, dict)]
 
     def _enter_stranger(self, driver):
-        """点击「陌生人消息」入口行，验证已进入。返回 True=成功"""
+        """点击 conversationStrangerBoxrowArea2→返回 True=已进入"""
         from selenium.webdriver.common.action_chains import ActionChains
 
-        # 1. 找 conversationStrangerBoxrowArea2 可点击行
-        clicked = driver.execute_script("""
+        # 找可点击的陌生人入口行
+        found = driver.execute_script("""
             let row = document.querySelector('[class*="conversationStrangerBoxrowArea2"]');
             if (!row) row = document.querySelector('[class*="StrangerBoxwrapper"]');
-            if (!row) {
-                // 降级：遍历找包含conversationStrangerBoxtitle的祖先
-                let title = document.querySelector('[class*="conversationStrangerBoxtitle"]');
-                if (title) {
-                    let p = title;
-                    for (let d=0; d<5; d++) {
-                        p = p.parentElement; if (!p) break;
-                        let r = p.getBoundingClientRect();
-                        if (r.width > 200) { row = p; break; }
-                    }
-                }
-            }
             if (row) {
                 row.setAttribute('data-stranger-click', '1');
                 return true;
             }
             return false;
         """)
-        if not clicked:
+        if not found:
             return False
 
-        # 2. Selenium 原生点击
         try:
             el = driver.find_element('css selector', '[data-stranger-click="1"]')
             ActionChains(driver).move_to_element(el).click().perform()
+            time.sleep(4)  # 等页面切换
+            return True
         except:
             return False
-
-        time.sleep(3)
-
-        # 3. 验证：对话列表是否变成了个体用户（而非原来的陌生人入口）
-        inside = driver.execute_script("""
-            let items = document.querySelectorAll('[class*="conversationConversationItem"]');
-            for (let el of items) {
-                let txt = el.textContent || '';
-                // 用户对话包含时间戳格式（如"刚刚""分钟前""月日"）
-                if (/刚刚|分钟前|小时前|昨天|\\d+月\\d+日/.test(txt)) {
-                    return true;
-                }
-            }
-            return false;
-        """)
-        return inside
 
     def _back_to_list(self, driver):
         driver.execute_script("""
