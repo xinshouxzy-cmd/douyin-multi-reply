@@ -454,7 +454,7 @@ QStatusBar{background:#0f1f14;color:#8DC891}
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("遵义农商银行 · 辛振宇 · 抖音私信智能助手")
+        self.setWindowTitle("抖音私信智能助手 - 遵义农商银行 辛振宇")
         self.setGeometry(100, 100, 1050, 620)
         self.setStyleSheet(STYLE)
         self.config = load_rules()
@@ -462,12 +462,12 @@ class MainWindow(QMainWindow):
         self.tabs = {}
         self._build_ui()
         self._refresh_tabs()
-        self.statusBar().showMessage("遵义农商银行 · 新媒体部 · 辛振宇 | 就绪")
+        self.statusBar().showMessage("抖音私信智能助手 | 遵义农商银行 辛振宇 | 就绪")
 
     def _build_ui(self):
         c = QWidget(); self.setCentralWidget(c); ml = QVBoxLayout(c)
         # 品牌头部
-        hdr = QLabel(" 遵义农商银行 · 新媒体部 · 辛振宇")
+        hdr = QLabel(" 抖音私信智能助手 · 遵义农商银行 辛振宇")
         hdr.setStyleSheet("background:#006B3F;color:#D4AF37;font-size:14px;font-weight:bold;padding:8px;")
         hdr.setFixedHeight(36)
         ml.addWidget(hdr)
