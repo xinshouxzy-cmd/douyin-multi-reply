@@ -227,6 +227,7 @@ class AccountWorker(QThread):
                 if not first_name:
                     time.sleep(self.poll)
                     continue
+                now = time.time()
                 if first_name in last_reply_time and now - last_reply_time[first_name] < 30:
                     time.sleep(self.poll)
                     continue
