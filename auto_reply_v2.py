@@ -380,17 +380,18 @@ class AccountWorker(QThread):
 
                 if found:
                     time.sleep(2)
-                    # 读所有对方消息（排除与我方回复完全相同的内容）
+                    # 读所有对方消息：取容器的全部文本（非单个span）
                     my_reply = self.reply_text
                     msgs = driver.execute_script("""
                         let results = [];
                         let containers = document.querySelectorAll('[class*="MessageItemTextcontainer"]');
                         containers.forEach(el => {
-                            let text = el.querySelector('[class*="TextMessageTextpureText"]');
-                            if (text) {
-                                let t = text.textContent.trim();
-                                if (t) results.push(t);
-                            }
+                            // 读容器内所有 TextMessageTextpureText 的完整文本
+                            let spans = el.querySelectorAll('[class*="TextMessageTextpureText"]');
+                            let full = '';
+                            spans.forEach(s => { full += s.textContent; });
+                            full = full.trim();
+                            if (full) results.push(full);
                         });
                         return results;
                     """)
