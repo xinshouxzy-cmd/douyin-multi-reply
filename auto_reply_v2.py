@@ -34,7 +34,7 @@ def load_rules():
             return json.load(f)
     return {"accounts": [
         {"name": "账号1", "enabled": True,
-         "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式，我们将安排客户经理与您联系~"}
+         "reply_text": "请问您是遵义市哪个区县的户口呢？如需帮助请留下☎️"}](
     ]}
 
 
@@ -522,7 +522,7 @@ class MainWindow(QMainWindow):
         n = len(self.config["accounts"]) + 1
         self.config["accounts"].append({
             "name": f"账号{n}", "enabled": True,
-            "reply_text": "您好！感谢关注遵义农商银行，请问您是在遵义市吗？如需办理业务请留下您的联系方式~"
+            "reply_text": "请问您是遵义市哪个区县的户口呢？如需帮助请留下☎️"
         })
         self._refresh_tabs(); self._log("系统", f"已添加账号{n}")
 
