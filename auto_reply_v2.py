@@ -481,8 +481,6 @@ class MainWindow(QMainWindow):
         b = QPushButton("+ 添加账号"); b.setObjectName("btnAdd"); b.clicked.connect(self._add_account); top.addWidget(b)
         b = QPushButton("💾 保存"); b.clicked.connect(self._save); top.addWidget(b)
         top.addStretch()
-        b = QPushButton("▶ 全部启动"); b.setObjectName("btnStart"); b.clicked.connect(self._start_all); top.addWidget(b)
-        b = QPushButton("⏹ 全部停止"); b.setObjectName("btnStop"); b.clicked.connect(self._stop_all); top.addWidget(b)
         b = QPushButton("📊 全部导出"); b.setStyleSheet("background:#D4AF37;color:#000;font-weight:bold;border:none;padding:6px 14px;border-radius:4px;"); b.clicked.connect(self._export_all); top.addWidget(b)
         ml.addLayout(top)
         self.tab_w = QTabWidget(); ml.addWidget(self.tab_w)
@@ -515,8 +513,13 @@ class MainWindow(QMainWindow):
         b = QPushButton("⏹ 停止"); b.clicked.connect(lambda _, x=i: self._stop(x)); r4.addWidget(b)
         l.addLayout(r4)
 
-        r5 = QHBoxLayout(); r5.addStretch(); b = QPushButton("🗑 删除账号")
-        b.clicked.connect(lambda _, x=i: self._del(x)); r5.addWidget(b); l.addLayout(r5)
+        r5 = QHBoxLayout(); r5.addStretch()
+        b = QPushButton("🗑 删除账号")
+        b.clicked.connect(lambda _, x=i: self._del(x)); r5.addWidget(b)
+        b = QPushButton("🧹 清除登录数据")
+        b.setStyleSheet("background:#555;color:#ddd;")
+        b.clicked.connect(lambda _, x=i: self._clear_profile(x)); r5.addWidget(b)
+        l.addLayout(r5)
 
         self.tab_w.addTab(t, a.get("name", f"账号{i+1}"))
         self.tabs[i] = {"name": nm, "enabled": en, "status": st, "reply": rp}
@@ -532,6 +535,22 @@ class MainWindow(QMainWindow):
     def _del(self, i):
         if QMessageBox.question(self, "确认", f"删除{self.config['accounts'][i]['name']}？") == QMessageBox.Yes:
             self._stop(i); del self.config["accounts"][i]; save_rules(self.config); self._refresh_tabs()
+
+    def _clear_profile(self, i):
+        nm = self.config["accounts"][i]["name"]
+        if nm in self.workers:
+            QMessageBox.warning(self, "提示", "请先停止该账号再清除登录数据")
+            return
+        profile = os.path.join(PROFILES_DIR, f"acc_{i}")
+        if not os.path.exists(profile):
+            QMessageBox.information(self, "提示", "该账号没有本地登录数据")
+            return
+        if QMessageBox.question(self, "确认清除",
+            f"清除 [{nm}] 的本地登录数据？\n\n下次启动需重新扫码登录。",
+            QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            import shutil
+            shutil.rmtree(profile, ignore_errors=True)
+            self._log("系统", f"已清除 [{nm}] 登录数据")
 
     def _read(self, i):
         t = self.tabs[i]
