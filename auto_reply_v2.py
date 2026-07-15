@@ -34,7 +34,7 @@ def load_rules():
             return json.load(f)
     return {"accounts": [
         {"name": "账号1", "enabled": True,
-         "reply_text": "请问您是遵义市哪个区县的户口呢？如需帮助请留下☎️"}](
+         "reply_text": "请问您是遵义市哪个区县的户口呢？如需帮助请留下☎️"}
     ]}
 
 
