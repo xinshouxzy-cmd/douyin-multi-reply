@@ -380,14 +380,12 @@ class AccountWorker(QThread):
 
                 if found:
                     time.sleep(2)
-                    # 读所有消息，排除我方回复（带MessageItemText的container）
+                    # 读所有对方消息（排除与我方回复完全相同的内容）
+                    my_reply = self.reply_text
                     msgs = driver.execute_script("""
                         let results = [];
                         let containers = document.querySelectorAll('[class*="MessageItemTextcontainer"]');
                         containers.forEach(el => {
-                            let cls = el.className || '';
-                            // 跳过我方消息（container有额外MessageItemText类）
-                            if (cls.includes('MessageItemTextcontainer') && cls.split('MessageItemText').length > 2) return;
                             let text = el.querySelector('[class*="TextMessageTextpureText"]');
                             if (text) {
                                 let t = text.textContent.trim();
@@ -396,6 +394,9 @@ class AccountWorker(QThread):
                         });
                         return results;
                     """)
+                    # 过滤掉我方自动回复的消息
+                    if my_reply:
+                        msgs = [m for m in msgs if m != my_reply]
                     if msgs:
                         # 第一条=打招呼，剩下的=后续回复
                         follow_up[name] = " | ".join(msgs[1:]) if len(msgs) > 1 else ""
