@@ -81,13 +81,15 @@ class AccountWorker(QThread):
         # 今天回复过的所有陌生人: {昵称: {"first_msg": 对方第一条消息, "my_reply": 我方回复}}
         self.today_strangers = {}
         self._in_stranger = False
-        self._export_path = None  # GUI设置的导出路径
+        self._export_path = None
+        self._export_done = threading.Event()
 
     def confirm_login(self):
         self._login_ok.set()
 
     def trigger_export(self, path=None):
         self._export_path = path
+        self._export_done.clear()
         self._export_now.set()
 
     def stop(self):
@@ -166,6 +168,7 @@ class AccountWorker(QThread):
                     self._in_stranger = False
                     fp = self._generate_report(filepath=self._export_path)
                     self._export_path = None
+                    self._export_done.set()
                     last_refresh = time.time()  # 重置刷新计时，避免导出后立即刷新
                     if fp:
                         self.log(f"导出: {os.path.basename(fp)}")
@@ -477,6 +480,7 @@ class MainWindow(QMainWindow):
         top.addStretch()
         b = QPushButton("▶ 全部启动"); b.setObjectName("btnStart"); b.clicked.connect(self._start_all); top.addWidget(b)
         b = QPushButton("⏹ 全部停止"); b.setObjectName("btnStop"); b.clicked.connect(self._stop_all); top.addWidget(b)
+        b = QPushButton("📊 全部导出"); b.setStyleSheet("background:#D4AF37;color:#000;font-weight:bold;border:none;padding:6px 14px;border-radius:4px;"); b.clicked.connect(self._export_all); top.addWidget(b)
         ml.addLayout(top)
         self.tab_w = QTabWidget(); ml.addWidget(self.tab_w)
         g = QGroupBox("运行日志"); vl = QVBoxLayout(g)
@@ -578,6 +582,58 @@ class MainWindow(QMainWindow):
         if path:
             self.workers[nm].trigger_export(path)
             self._log(nm, "已触发导出...")
+
+    def _export_all(self):
+        """全部导出: 每个账号一张sheet，保存为一个xlsx"""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(self, "全部导出",
+            f"抖音私信记录_{ts}.xlsx", "Excel文件(*.xlsx)")
+        if not path: return
+
+        import tempfile, csv as csv_mod
+        tmpdir = tempfile.mkdtemp()
+        files = []
+
+        for i, a in enumerate(self.config.get("accounts", [])):
+            nm = a["name"]
+            if nm not in self.workers:
+                continue
+            csv_path = os.path.join(tmpdir, f"{nm}.csv")
+            self.workers[nm].trigger_export(csv_path)
+            self._log(nm, "导出中...")
+            # 等待该账号导出完成（最多60秒）
+            self.workers[nm]._export_done.wait(60)
+            if os.path.exists(csv_path):
+                files.append((nm, csv_path))
+
+        if not files:
+            QMessageBox.warning(self, "提示", "没有导出任何记录")
+            return
+
+        # 合并为xlsx
+        try:
+            from openpyxl import Workbook
+            wb = Workbook()
+            wb.remove(wb.active)  # 删除默认sheet
+            for nm, fp in files:
+                with open(fp, "r", encoding="utf-8-sig") as f:
+                    rows = list(csv_mod.reader(f))
+                if not rows: continue
+                ws = wb.create_sheet(title=nm[:31])  # sheet名最长31字符
+                for row in rows:
+                    ws.append(row)
+                # 设置列宽
+                ws.column_dimensions['C'].width = 30  # 对方消息
+                ws.column_dimensions['E'].width = 30  # 对方回复
+            wb.save(path)
+            self._log("系统", f"全部导出完成: {len(files)}个账号 → {os.path.basename(path)}")
+            QMessageBox.information(self, "导出完成", f"已导出 {len(files)} 个账号到\n{path}")
+        except ImportError:
+            self._log("系统", "缺少openpyxl,无法生成xlsx")
+            QMessageBox.warning(self, "提示", "缺少openpyxl库,请安装: pip install openpyxl")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _upd(self, i, s):
         colors = {"监控中": "#25f4ee", "等待登录": "#ff9a44", "已停止": "#aaa"}
