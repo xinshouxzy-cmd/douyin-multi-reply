@@ -10,19 +10,37 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from commit
+        shell: bash
+        run: |
+          VER=$(git log -1 --pretty=%s | grep -oP '^v[\d.]+' || echo "dev")
+          echo "VERSION=$VER" >> $GITHUB_ENV
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install deps
         run: pip install pyinstaller selenium webdriver-manager PyQt5 openpyxl
+
       - name: Get chromedriver
         run: python -c "from webdriver_manager.chrome import ChromeDriverManager; p = ChromeDriverManager().install(); import shutil; shutil.copy(p, 'chromedriver.exe')"
+
       - name: Build
-        run: pyinstaller --onedir --windowed --name "抖音多账号自动回复" --add-data "chromedriver.exe;." --collect-all PyQt5 --collect-all selenium --hidden-import selenium.webdriver.chrome.webdriver auto_reply_v2.py
+        shell: pwsh
+        run: |
+          $name = "「抖音私信智能助手」$env:VERSION"
+          pyinstaller --onedir --windowed --name $name --add-data "chromedriver.exe;." --collect-all PyQt5 --collect-all selenium --hidden-import selenium.webdriver.chrome.webdriver auto_reply_v2.py
+
       - name: Package
-        run: Compress-Archive -Path "dist\抖音多账号自动回复\*" -DestinationPath "抖音多账号自动回复.zip"
+        shell: pwsh
+        run: |
+          $name = "「抖音私信智能助手」$env:VERSION"
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "$name.zip"
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: 抖音多账号自动回复
-          path: 抖音多账号自动回复.zip
+          name: "${{ env.VERSION }}"
+          path: "*.zip"
